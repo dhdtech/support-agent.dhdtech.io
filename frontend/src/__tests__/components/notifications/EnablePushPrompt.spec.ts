@@ -95,7 +95,7 @@ describe('EnablePushPrompt', () => {
     setNotificationPermission(null)
     vi.stubGlobal('navigator', { userAgent: 'iPhone Safari' })
     const wrapper = await mountPrompt()
-    expect(wrapper.text()).toContain('Add ChatterMate to your Home Screen')
+    expect(wrapper.text()).toContain('Add DHDTech.io Support to your Home Screen')
     expect(wrapper.find('.primary-btn').exists()).toBe(false)
   })
 })

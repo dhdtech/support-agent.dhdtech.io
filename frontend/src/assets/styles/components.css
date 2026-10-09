@@ -15,7 +15,7 @@
   gap: var(--space-sm);
   line-height: 1.4;
   background: var(--accent-solid);
-  color: #0B0C10;
+  color: var(--on-accent);
 }
 
 .btn:hover {
@@ -39,7 +39,7 @@
 
 .btn-primary {
   background: var(--accent-solid);
-  color: #0B0C10;
+  color: var(--on-accent);
   border-color: transparent;
 }
 
@@ -95,8 +95,8 @@
   top: 50%;
   left: 50%;
   margin: -8px 0 0 -8px;
-  border: 2px solid rgba(11,12,16,.4);
-  border-right-color: #0B0C10;
+  border: 2px solid rgba(10,10,10,.4);
+  border-right-color: var(--on-accent);
   border-radius: 50%;
   animation: button-loading-spinner 0.75s linear infinite;
 }
@@ -216,7 +216,7 @@
 .step-indicator.completed {
   background: var(--accent-solid);
   border-color: var(--accent-ink);
-  color: #0B0C10;
+  color: var(--on-accent);
 }
 
 .step-details h3 {

@@ -90,7 +90,7 @@ describe('SetupView', () => {
 
   it('renders properly', () => {
     expect(wrapper.find('.setup').exists()).toBe(true)
-    expect(wrapper.find('h1').text()).toBe('Welcome to ChatterMate')
+    expect(wrapper.find('h1').text()).toBe('Welcome to DHDTech.io Support')
   })
 
   it('checks for existing organization on mount', async () => {

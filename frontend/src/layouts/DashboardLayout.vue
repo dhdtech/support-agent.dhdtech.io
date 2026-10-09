@@ -375,7 +375,7 @@ const openNotificationsFromSheet = () => {
                  real space at the bottom clips the last message / message input out of view. -->
             <footer v-if="!props.hideHeader" class="footer">
                 <div class="footer-content">
-                    <p>&copy; 2024 ChatterMate. All rights reserved.</p>
+                    <p>&copy; 2024 DHDTech.io Support. All rights reserved.</p>
                     <nav class="footer-links">
                         <a href="https://chattermate.chat/privacy_policy.html">Privacy Policy</a>
                         <a href="https://chattermate.chat/terms_and_conditions.html">Terms of Service</a>

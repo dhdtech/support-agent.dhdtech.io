@@ -87,9 +87,9 @@ export default defineConfig(({ command, mode }) => {
       // script stays the first script tag and embedded contexts never register.
       injectRegister: false,
       manifest: {
-        name: 'ChatterMate',
-        short_name: 'ChatterMate',
-        description: 'Agent console for ChatterMate — handle customer chats anywhere.',
+        name: 'DHDTech.io Support',
+        short_name: 'DHDTech.io Support',
+        description: 'Support agent console — handle customer chats anywhere.',
         start_url: '/',
         scope: '/',
         display: 'standalone',

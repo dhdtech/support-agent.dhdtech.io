@@ -6,7 +6,7 @@
   <meta name="robots" content="noindex, nofollow">
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
-  <meta name="theme-color" content="#0B0C10">
+  <meta name="theme-color" content="#0a0a0a">
   <script>
     /* Applies the saved theme before first paint.
        useTheme.ts sets data-theme and theme-color too, but only once the bundle
@@ -25,7 +25,7 @@
           : (stored === 'light' ? 'light' : 'dark');
         document.documentElement.setAttribute('data-theme', resolved);
         var meta = document.querySelector('meta[name="theme-color"]');
-        if (meta) meta.setAttribute('content', resolved === 'dark' ? '#0B0C10' : '#EEF0F4');
+        if (meta) meta.setAttribute('content', resolved === 'dark' ? '#0a0a0a' : '#EEF0F4');
       } catch (e) {
         /* Private mode can throw on localStorage; the dark default already applies. */
       }
@@ -35,12 +35,11 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="ChatterMate">
+  <meta name="apple-mobile-web-app-title" content="DHDTech.io Support">
   <link rel="apple-touch-icon" href="/apple-touch-icon-180x180.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap">
-  <title>ChatterMate - Setup</title>
+  <title>DHDTech.io Support - Setup</title>
   <meta name="shopify-api-key" content="<%= VITE_SHOPIFY_API_KEY %>" />
   <!-- Shopify App Bridge, and the Polaris web components the Shopify views use.
        Only loaded inside the Shopify admin (host/shop query params present);

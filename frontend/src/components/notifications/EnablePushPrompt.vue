@@ -73,7 +73,7 @@ const enable = () => {
       <template v-if="needsInstallFirst">
         <div class="prompt-title">Install to get notifications</div>
         <div class="prompt-body">
-          Add ChatterMate to your Home Screen first — on iPhone, push notifications only work
+          Add DHDTech.io Support to your Home Screen first — on iPhone, push notifications only work
           from an installed app. Tap the share icon, then "Add to Home Screen".
         </div>
         <button type="button" class="secondary-btn" @click="snooze">Got it</button>

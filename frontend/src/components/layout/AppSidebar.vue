@@ -20,6 +20,7 @@ import { useRoute } from 'vue-router'
 import { useNavItems, navIconSvg } from './navItems'
 
 import SidebarToggle from './SidebarToggle.vue'
+import brandMark from '@/assets/logo.svg'
 
 defineProps<{
     isCollapsed: boolean
@@ -46,12 +47,8 @@ const handleNavigation = () => {
         <!-- Logo -->
         <div class="sidebar-header">
             <div class="logo-container">
-                <div class="logo-mark" aria-hidden="true">
-                    <div class="dot"></div>
-                    <div class="dot"></div>
-                    <div class="dot"></div>
-                </div>
-                <span v-if="!isCollapsed" class="logo-text">ChatterMate</span>
+                <img :src="brandMark" class="logo-mark" alt="" />
+                <span v-if="!isCollapsed" class="logo-text">DHDTech.io Support</span>
             </div>
             <SidebarToggle :isCollapsed="isCollapsed" @toggle="emit('toggle')" />
         </div>
@@ -120,24 +117,12 @@ const handleNavigation = () => {
     min-width: 0;
 }
 
-/* 3-dot logo mark */
+/* Brand mark */
 .logo-mark {
     width: 32px;
     height: 32px;
-    background: var(--accent-solid);
-    border-radius: 10px 10px 10px 2px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 3px;
     flex-shrink: 0;
-}
-
-.dot {
-    width: 4.5px;
-    height: 4.5px;
-    background: var(--on-accent);
-    border-radius: 50%;
+    object-fit: contain;
 }
 
 .logo-text {

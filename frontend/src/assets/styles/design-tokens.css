@@ -1,47 +1,47 @@
 /* ChatterMate Design Tokens — dark-first, lime accent */
 :root {
   /* Surfaces */
-  --bg: #0B0C10;
-  --bg2: #0E0F14;
-  --surface: #13151C;
-  --topbar: rgba(11,12,16,.8);
+  --bg: #0a0a0a;
+  --bg2: #101010;
+  --surface: #161616;
+  --topbar: rgba(10,10,10,.8);
 
   /* Accent */
-  --accent-ink: #C9F24E;        /* accent for text / borders / icons (darkens in light mode) */
-  --accent-solid: #C9F24E;      /* accent for FILLED surfaces (stays lime in both themes) */
-  --on-accent-solid: #0B0C10;   /* text/icon on --accent-solid (dark in both themes) */
-  --c-lime: #C9F24E;
-  --c-teal: #5FE3D6;
-  --c-purple: #9D8CFF;
-  --c-coral: #FF8A73;
+  --accent-ink: #818cf8;        /* accent for text / borders / icons (darkens in light mode) */
+  --accent-solid: #6366f1;      /* accent for FILLED surfaces (stays lime in both themes) */
+  --on-accent-solid: #ffffff;   /* text/icon on --accent-solid (dark in both themes) */
+  --c-lime: #6366f1;
+  --c-teal: #38bdf8;
+  --c-purple: #818cf8;
+  --c-coral: #ef4444;
 
   /* Contrast inks — text/icon placed on top of a fill */
-  --on-accent: #0B0C10;   /* on lime accent */
+  --on-accent: #ffffff;   /* on lime accent */
   --on-light: #0B0C10;    /* on any light fill */
   --on-dark: #F5F6F8;     /* on any dark/coloured fill (theme-invariant) */
 
   /* Elevated surfaces / header gradient */
-  --bg-elevated: #101119;
-  --bg-deep: #0A0B0E;
+  --bg-elevated: #161616;
+  --bg-deep: #0a0a0a;
   --header-gradient: linear-gradient(180deg, var(--bg-elevated), var(--bg));
   --scrim: rgba(6,7,10,.72);
 
   /* Mode pills (agent editor) */
-  --mode-ai-bg: #3B82F6;
+  --mode-ai-bg: #6366f1;
   --mode-ai-fg: #FFFFFF;
-  --mode-wf-bg: #9D8CFF;
+  --mode-wf-bg: #818cf8;
   --mode-wf-fg: #0B0C10;
   --pill-idle-bg: var(--o05);
   --pill-idle-fg: var(--muted);
 
   /* Extended status / chart palette */
-  --c-danger: #FF6B6B;
-  --c-warn: #E6A23C;
-  --c-info: #8FB8FF;
-  --c-positive: #7CE38B;
+  --c-danger: #ef4444;
+  --c-warn: #f59e0b;
+  --c-info: #38bdf8;
+  --c-positive: #22c55e;
   --c-neutral: #8A93A3;
-  --c-online: #8FEDE3;    /* online label text */
-  --c-pro: #C5BDFF;       /* PRO badge text */
+  --c-online: #5eead4;    /* online label text */
+  --c-pro: #818cf8;       /* PRO badge text */
 
   /* Theme-aware tints (derived from base palette, auto-adjust per theme) */
   --accent-bg-06: color-mix(in srgb, var(--accent-ink) 6%, transparent);
@@ -77,13 +77,13 @@
   --grad-generate: linear-gradient(135deg, var(--c-purple), #7C6AE6);
 
   /* Text scale */
-  --text: #F5F6F8;
-  --text2: #E7EAF0;
-  --text3: #C7CCD6;
-  --muted: #9CA3B0;
-  --muted2: #7A8190;
-  --faint: #5B6271;
-  --code: #D7DBE3;
+  --text: #e0e0e0;
+  --text2: #cfd2d8;
+  --text3: #9ca3af;
+  --muted: #9ca3af;
+  --muted2: #828a97;
+  --faint: #828a97;
+  --code: #c9c9cf;
 
   /* White-opacity tokens — borders, dividers, overlays */
   --o03: rgba(255,255,255,.03);
@@ -101,21 +101,21 @@
   --o30: rgba(255,255,255,.3);
 
   /* Semantic */
-  --success-color: #0f9d6e;
-  --error-color: #DC2626;
-  --error-dark: #b91c1c;
-  --warning-color: #D97706;
-  --info-color: #2563EB;
+  --success-color: #22c55e;
+  --error-color: #ef4444;
+  --error-dark: #dc2626;
+  --warning-color: #f59e0b;
+  --info-color: #38bdf8;
   --success-bg: rgba(15,157,110,.1);
   --error-bg: rgba(220,38,38,.1);
   --warning-bg: rgba(217,119,6,.1);
   --info-bg: rgba(37,99,235,.1);
 
   /* Fonts */
-  --font-family: 'Instrument Sans', system-ui, -apple-system, sans-serif;
-  --font-sans: 'Instrument Sans', system-ui, -apple-system, sans-serif;
+  --font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+  --font-sans: 'Space Grotesk', system-ui, -apple-system, sans-serif;
   --font-display: 'Space Grotesk', sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
+  --font-mono: 'Martian Mono', ui-monospace, 'SFMono-Regular', 'Menlo', monospace;
 
   /* Font weights */
   --font-weight-normal: 400;
@@ -148,16 +148,16 @@
   --space-3xl: 4rem;
 
   /* Border radius */
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 16px;
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
   --radius-full: 9999px;
   /* Design-spec radii */
-  --radius-chip: 10px;
-  --radius-btn: 11px;
-  --radius-input: 12px;
-  --radius-card: 18px;
-  --radius-card-lg: 20px;
+  --radius-chip: 0px;
+  --radius-btn: 0px;
+  --radius-input: 0px;
+  --radius-card: 0px;
+  --radius-card-lg: 0px;
   --radius-pill: 999px;
 
   /* Transitions */
@@ -166,12 +166,12 @@
   --transition-slow: 0.4s cubic-bezier(0.4,0,0.2,1);
 
   /* Shadows */
-  --shadow-sm: 0 1px 2px rgba(0,0,0,.15);
-  --shadow-md: 0 4px 12px rgba(0,0,0,.2);
-  --shadow-lg: 0 20px 50px rgba(0,0,0,.5);
+  --shadow-sm: 2px 2px 0 0 rgba(99,102,241,.35);
+  --shadow-md: 4px 4px 0 0 rgba(99,102,241,.35);
+  --shadow-lg: 6px 6px 0 0 rgba(99,102,241,.35);
 
   /* Focus ring */
-  --ring-focus: 0 0 0 3px rgba(201,242,78,.15);
+  --ring-focus: 0 0 0 3px rgba(99,102,241,.35);
 
   /* Icon filters (for SVG img elements on dark bg) */
   --icon-filter: brightness(0) invert(1);
@@ -205,7 +205,7 @@
 
   /* Legacy aliases (keep for component compatibility) */
   --primary-color: var(--accent-ink);
-  --primary-dark: #b3d943;
+  --primary-dark: #4f46e5;
   --background-color: var(--bg);
   --background-base: var(--surface);
   --background-soft: var(--bg2);
@@ -220,13 +220,13 @@
   --text-muted: var(--muted);
   --text-placeholder: var(--faint);
   --code-bg: var(--surface);
-  --primary-soft: rgba(201,242,78,.1);
+  --primary-soft: rgba(99,102,241,.1);
 
   /* Legacy aliases used by the agent editor (resolve via flipping tokens) */
   --accent-color: var(--accent-ink);
   --background-alt: var(--bg2);
   --background-muted: var(--o05);
-  --radius-xl: 20px;
+  --radius-xl: 0px;
   --success: var(--success-color);
   --success-dark: var(--success-color);
   --success-light: color-mix(in srgb, var(--success-color) 14%, transparent);
@@ -246,11 +246,11 @@
   --surface: #FFFFFF;
   --topbar: rgba(255,255,255,.85);
 
-  --accent-ink: #4C7A0B;
-  --c-lime: #4C7A0B;
-  --c-teal: #0E8C8C;
-  --c-purple: #6D5BD0;
-  --c-coral: #CF5B38;
+  --accent-ink: #6366f1;
+  --c-lime: #6366f1;
+  --c-teal: #38bdf8;
+  --c-purple: #818cf8;
+  --c-coral: #ef4444;
 
   --text: #171A21;
   --text2: #222732;
@@ -283,8 +283,8 @@
   --shadow-md: 0 4px 12px rgba(17,21,30,.08);
   --shadow-lg: 0 20px 50px rgba(17,21,30,.15);
 
-  --ring-focus: 0 0 0 3px rgba(76,122,11,.2);
-  --primary-soft: rgba(76,122,11,.08);
+  --ring-focus: 0 0 0 3px rgba(99,102,241,.35);
+  --primary-soft: rgba(99,102,241,.08);
 
   /* Contrast inks — accent is dark-olive in light, so text on it must be white */
   --on-accent: #FFFFFF;
@@ -316,7 +316,7 @@
 
   /* Legacy aliases */
   --primary-color: var(--accent-ink);
-  --primary-dark: #3d6209;
+  --primary-dark: #4f46e5;
   --background-color: var(--bg);
   --background-base: var(--surface);
   --background-soft: var(--bg2);

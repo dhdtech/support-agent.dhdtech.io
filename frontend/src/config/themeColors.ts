@@ -22,6 +22,6 @@ limitations under the License.
  * value as the pre-JS default.
  */
 export const THEME_COLORS = {
-  dark: '#0B0C10',
+  dark: '#0a0a0a',
   light: '#EEF0F4',
 } as const

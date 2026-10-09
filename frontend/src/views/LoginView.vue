@@ -22,6 +22,7 @@ import { resolveLandingRoute } from '@/router/landing'
 import { useEnterpriseFeatures } from '@/composables/useEnterpriseFeatures'
 import { useForgotPassword } from '@/composables/useForgotPassword'
 import InstallPrompt from '@/components/pwa/InstallPrompt.vue'
+import brandMark from '@/assets/logo.svg'
 import { apiPath, getApiUrl } from '@/config/api'
 import type { AxiosError } from 'axios'
 interface ErrorResponse {
@@ -274,12 +275,8 @@ const handleVerifyAndResetPassword = async () => {
         <div class="form-panel">
             <!-- Logo mark -->
             <div class="auth-logo">
-                <div class="logo-mark">
-                    <div class="dot"></div>
-                    <div class="dot"></div>
-                    <div class="dot"></div>
-                </div>
-                <span class="logo-word">ChatterMate</span>
+                <img :src="brandMark" class="logo-mark" alt="" />
+                <span class="logo-word">DHDTech.io Support</span>
             </div>
 
             <h1 class="auth-title">Welcome back</h1>
@@ -523,20 +520,8 @@ const handleVerifyAndResetPassword = async () => {
 .logo-mark {
     width: 32px;
     height: 32px;
-    background: var(--accent-solid);
-    border-radius: 10px 10px 10px 2px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 3.5px;
     flex-shrink: 0;
-}
-
-.dot {
-    width: 4.5px;
-    height: 4.5px;
-    background: var(--on-accent);
-    border-radius: 50%;
+    object-fit: contain;
 }
 
 .logo-word {
