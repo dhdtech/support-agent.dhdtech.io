@@ -4,10 +4,21 @@ set -e
 # Set environment variable to prevent tokenizer deadlock warnings
 export TOKENIZERS_PARALLELISM=false
 
-# Wait for PostgreSQL to be ready
-echo "Waiting for PostgreSQL..."
-while ! nc -z db 5432; do
-  sleep 0.1
+# Wait for PostgreSQL to be ready.
+# The host comes from DATABASE_URL, not a hardcoded `db`: the upstream compose
+# ships a `db` service, but a managed datastore is reached under another name and
+# a literal here blocks the container forever with no useful error.
+DB_HOST=$(python3 -c "import os,urllib.parse as u;print(u.urlparse(os.environ.get('DATABASE_URL','').replace('+psycopg','')).hostname or 'db')")
+DB_PORT=$(python3 -c "import os,urllib.parse as u;print(u.urlparse(os.environ.get('DATABASE_URL','').replace('+psycopg','')).port or 5432)")
+echo "Waiting for PostgreSQL at ${DB_HOST}:${DB_PORT}..."
+tries=0
+until nc -z "$DB_HOST" "$DB_PORT"; do
+  tries=$((tries + 1))
+  if [ "$tries" -gt 120 ]; then
+    echo "PostgreSQL at ${DB_HOST}:${DB_PORT} did not become reachable after 60s" >&2
+    exit 1
+  fi
+  sleep 0.5
 done
 echo "PostgreSQL is ready!"
 
