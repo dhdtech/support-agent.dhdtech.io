@@ -55,6 +55,8 @@ from app.services.human_routing import (
     HUMAN_ONLY_ACK,
     QUEUED_FOR_HUMAN_NOTICE,
     notify_customer,
+    notify_handoff_slack,
+    pop_pending_handoff,
 )
 from app.services.lead_capture import record_lead_from_response
 from app.services.message_delivery import deliver_to_customer
@@ -2052,6 +2054,20 @@ async def handle_contact_info(sid, data):
                 'transfer_to_human': False,
                 'end_chat': False,
             }, room=session_id, namespace='/widget')
+
+        # The handoff alert was held back so this form's answer could make it
+        # into the text. Post it now, once: the pop is what keeps this handler
+        # and the fallback timer from both posting.
+        pending = pop_pending_handoff(session_id)
+        if pending:
+            handoff_session = SessionToAgentRepository(db).get_session(session_id)
+            if handoff_session is not None:
+                await notify_handoff_slack(
+                    db,
+                    handoff_session,
+                    reason=pending.get('reason'),
+                    description=pending.get('description'),
+                )
     except Exception as e:
         logger.error(f"Error handling contact info for sid {sid}: {str(e)}")
     finally:

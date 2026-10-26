@@ -15,13 +15,19 @@ limitations under the License.
 """
 
 from typing import Optional
+import asyncio
+import json
+from asyncio import sleep as _sleep
 from uuid import UUID
 
 import httpx
 from sqlalchemy.orm import Session
 
+from app.channels.constants import is_widget_channel
 from app.core.config import settings
 from app.core.logger import get_logger
+from app.core.redis import get_redis
+from app.database import get_db
 from app.models.chat_history import ChatHistory
 from app.models.session_to_agent import SessionStatus
 from app.repositories.agent import AgentRepository
@@ -31,6 +37,7 @@ from app.repositories.group import GroupRepository
 from app.repositories.session_to_agent import SessionToAgentRepository
 from app.repositories.user import UserRepository
 from app.services.chat_notifications import UNASSIGNED_CHAT_VIEWERS
+from app.services.contact_capture import build_handoff_contact_form
 from app.services.message_delivery import deliver_to_customer
 from app.services.notifications import ChatNotificationEvent, notify_chat_event
 from app.services.slack_bridge import escape_slack_text, post_handoff_to_bridge
@@ -271,3 +278,164 @@ async def route_session_to_human(
     await notify_customer(db, session, QUEUED_FOR_HUMAN_NOTICE)
     await notify_handoff_slack(db, session, reason=reason, description=description)
     return True
+
+
+# How long the operator alert waits for the widget's handoff contact form. The
+# form is the visitor's answer to "share your details", so the alert is held
+# until it arrives — but a visitor who closes the widget must still reach
+# somebody, hence the fallback. The stored record outlives the fallback so a
+# slow submit cannot race an expired key into a second post.
+HANDOFF_FALLBACK_DELAY_SECONDS = 120
+PENDING_HANDOFF_TTL_SECONDS = 300
+
+# Redis when it is on, because the submit handler can be served by a different
+# worker than the transfer; a process-local dict otherwise.
+_pending_handoffs: dict[str, dict] = {}
+_fallback_tasks: set = set()
+
+
+def _pending_handoff_key(session_id) -> str:
+    return f"handoff:pending:{session_id}"
+
+
+def _store_pending_handoff(session_id, pending: dict) -> None:
+    client = get_redis()
+    if client:
+        try:
+            client.setex(
+                _pending_handoff_key(session_id),
+                PENDING_HANDOFF_TTL_SECONDS,
+                json.dumps(pending),
+            )
+            return
+        except Exception as e:
+            logger.warning(f"Redis unavailable for the pending handoff alert: {e}")
+    _pending_handoffs[str(session_id)] = pending
+
+
+def pop_pending_handoff(session_id) -> Optional[dict]:
+    """Take the pending handoff for a session, if one is waiting.
+
+    Exactly one caller can win, which is what keeps the fallback timer and the
+    contact-form submit handler from posting the same alert twice.
+    """
+    session_key = str(session_id)
+    client = get_redis()
+    if client:
+        try:
+            # GET+DEL in one MULTI/EXEC. GETDEL would be shorter but needs a
+            # Redis 6.2 server, and nothing in this repo pins one.
+            pipe = client.pipeline(transaction=True)
+            pipe.get(_pending_handoff_key(session_key))
+            pipe.delete(_pending_handoff_key(session_key))
+            raw = pipe.execute()[0]
+            if raw:
+                return json.loads(raw)
+        except Exception as e:
+            logger.warning(f"Redis unavailable for the pending handoff alert: {e}")
+    return _pending_handoffs.pop(session_key, None)
+
+
+def _schedule_handoff_fallback(session_id) -> None:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.warning(
+            "No running event loop; the handoff alert is only posted if the "
+            "contact form arrives")
+        return
+    task = loop.create_task(_post_handoff_after_timeout(session_id))
+    # A bare task can be garbage-collected mid-flight, and a plain thread-based
+    # timer would hold the process open on shutdown — a loop task does neither.
+    _fallback_tasks.add(task)
+    task.add_done_callback(_fallback_tasks.discard)
+
+
+async def _post_handoff_after_timeout(session_id) -> None:
+    """Post the held alert when the contact form never arrives.
+
+    Best-effort like the alert itself: any failure is logged and swallowed, so
+    nothing a visitor does (or does not do) surfaces as a server error.
+    """
+    try:
+        await _sleep(HANDOFF_FALLBACK_DELAY_SECONDS)
+        pending = pop_pending_handoff(session_id)
+        if not pending:
+            return
+        db = next(get_db())
+        try:
+            session = SessionToAgentRepository(db).get_session(session_id)
+            if session is None:
+                return
+            await notify_handoff_slack(
+                db,
+                session,
+                reason=pending.get('reason'),
+                description=pending.get('description'),
+            )
+        finally:
+            db.close()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error(f"Deferred handoff alert failed: {e}")
+
+
+def _contact_form_will_be_shown(db, agent, customer_id, channel, is_workflow_transfer) -> bool:
+    """Whether the widget will emit its handoff contact form for this transfer.
+
+    Mirrors the emit site in widget_chat: widget surfaces only, the plain agent
+    path (a workflow transfer returns before reaching the form block), and
+    something still to ask for — decided by the same builder, so the two can
+    never disagree about which fields are missing.
+    """
+    if is_workflow_transfer or not is_widget_channel(channel):
+        return False
+    if agent is None or not customer_id:
+        return False
+    customer = CustomerRepository(db).get_by_id(customer_id)
+    if customer is None:
+        return False
+    return build_handoff_contact_form(
+        customer,
+        collect_email=getattr(agent, 'handoff_collect_email', True),
+        collect_name=getattr(agent, 'handoff_collect_name', True),
+    ) is not None
+
+
+async def alert_handoff_after_transfer(
+    db: Session,
+    session,
+    *,
+    reason: Optional[str] = None,
+    description: Optional[str] = None,
+    agent=None,
+    customer_id=None,
+    channel: Optional[str] = None,
+    is_workflow_transfer: bool = False,
+) -> None:
+    """Post the operator alert now, or hold it for the handoff contact form.
+
+    The widget asks for the visitor's email/name *after* the response that ended
+    in the handoff, so an alert posted at transfer time reads "Unknown customer"
+    for someone who is about to type their name. When that form will be shown,
+    the alert is held against the session and posted by the submit handler with
+    the details in it.
+    """
+    if session is None:
+        return
+    try:
+        hold = _contact_form_will_be_shown(db, agent, customer_id, channel, is_workflow_transfer)
+    except Exception as e:
+        # The handoff has already happened; a bad look at the customer row must
+        # not turn it into an error. Post now, which is what always happened.
+        logger.error(f"Could not tell whether the contact form will be shown: {e}")
+        hold = False
+    if hold:
+        _store_pending_handoff(session.session_id, {
+            'reason': reason,
+            'description': description,
+        })
+        _schedule_handoff_fallback(session.session_id)
+        return
+    await notify_handoff_slack(db, session, reason=reason, description=description)

@@ -1262,13 +1262,19 @@ Keep your responses concise and focused. Provide clear, actionable information i
             }
         )
         if transferred:
-            # Same operator alert the dashboard's own handoff sends.
-            from app.services.human_routing import notify_handoff_slack
-            await notify_handoff_slack(
+            # Same operator alert the dashboard's own handoff sends — held back
+            # when the widget is about to ask the visitor for their details, so
+            # the alert carries those instead of "Unknown customer".
+            from app.services.human_routing import alert_handoff_after_transfer
+            await alert_handoff_after_transfer(
                 db,
                 session_repo.get_session(session_id),
                 reason=transfer_reason,
                 description=transfer_description,
+                agent=self.agent_data,
+                customer_id=customer_id,
+                channel=self.channel,
+                is_workflow_transfer=is_workflow_transfer,
             )
 
         # Notify the target group's members who haven't muted transfers
