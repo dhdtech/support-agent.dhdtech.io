@@ -17,11 +17,16 @@ limitations under the License.
 from typing import Optional
 from uuid import UUID
 
+import httpx
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.logger import get_logger
+from app.models.chat_history import ChatHistory
 from app.models.session_to_agent import SessionStatus
+from app.repositories.agent import AgentRepository
 from app.repositories.chat import ChatRepository
+from app.repositories.customer import CustomerRepository
 from app.repositories.group import GroupRepository
 from app.repositories.session_to_agent import SessionToAgentRepository
 from app.repositories.user import UserRepository
@@ -30,6 +35,9 @@ from app.services.message_delivery import deliver_to_customer
 from app.services.notifications import ChatNotificationEvent, notify_chat_event
 
 logger = get_logger(__name__)
+
+SLACK_TIMEOUT_SECONDS = 10
+LAST_MESSAGE_MAX_CHARS = 300
 
 # The widget shows handover state in its own UI, so only external channels need
 # a message spelling out what just happened.
@@ -103,6 +111,111 @@ def _transfer_recipients(db: Session, session, group_id) -> list:
     return [user.id for user in users]
 
 
+def _last_visitor_message(db: Session, session_id) -> str:
+    """Most recent customer turn, decrypted, for the operator alert.
+
+    Ordered by (created_at, id): the (session_id, created_at DESC, id DESC)
+    index serves the order, and id breaks a same-second tie.
+    """
+    if isinstance(session_id, str):
+        session_id = UUID(session_id)
+    message = (
+        db.query(ChatHistory.message)
+        .filter(
+            ChatHistory.session_id == session_id,
+            ChatHistory.message_type == 'user',
+        )
+        .order_by(ChatHistory.created_at.desc(), ChatHistory.id.desc())
+        .limit(1)
+        .scalar()
+    )
+    return (message or '').strip()
+
+
+def _escape_slack(value) -> str:
+    """Neutralize mrkdwn/links in untrusted text.
+
+    A visitor's own message and profile are rendered in the operator's Slack;
+    without this, a message containing <https://evil|click here> would arrive
+    as a live link.
+    """
+    return (
+        str(value or '')
+        .replace('&', '&amp;')
+        .replace('<', '&lt;')
+        .replace('>', '&gt;')
+    )
+
+
+def _handoff_slack_text(db: Session, session, reason, description) -> str:
+    """Slack mrkdwn summary of a chat that is now waiting for a human."""
+    agent_name = 'Unknown agent'
+    if session.agent_id:
+        agent = AgentRepository(db).get_agent(session.agent_id)
+        if agent:
+            agent_name = agent.name
+
+    customer_label = 'Unknown customer'
+    if session.customer_id:
+        customer = CustomerRepository(db).get_by_id(session.customer_id)
+        if customer:
+            customer_label = customer.full_name or customer.email or 'Unknown customer'
+            if customer.full_name and customer.email:
+                customer_label = f"{customer.full_name} ({customer.email})"
+
+    last_message = _last_visitor_message(db, session.session_id)
+    if len(last_message) > LAST_MESSAGE_MAX_CHARS:
+        last_message = last_message[:LAST_MESSAGE_MAX_CHARS].rstrip() + '…'
+    if not last_message:
+        last_message = '(no visitor message yet)'
+
+    link = (
+        f"{settings.FRONTEND_URL.rstrip('/')}/conversations"
+        f"?session={session.session_id}"
+    )
+    lines = [
+        "*Chat waiting for a human*",
+        f"*Agent:* {_escape_slack(agent_name)}",
+        f"*Customer:* {_escape_slack(customer_label)}",
+        f"*Reason:* {_escape_slack(reason) or 'not specified'}",
+        f"*Last message:* {_escape_slack(last_message)}",
+    ]
+    if description:
+        lines.append(f"*Details:* {_escape_slack(description)}")
+    lines.append(f"<{link}|Open the conversation>")
+    return "\n".join(lines)
+
+
+async def notify_handoff_slack(
+    db: Session,
+    session,
+    *,
+    reason: Optional[str] = None,
+    description: Optional[str] = None,
+) -> None:
+    """Post a handoff alert to the configured Slack incoming webhook.
+
+    Best-effort by design: an unset URL is a no-op, and a failure, an error
+    status or a timeout is logged and swallowed. The handoff has already
+    happened — an alert must never undo or delay its outcome.
+    """
+    url = settings.SLACK_HANDOFF_WEBHOOK_URL
+    if not url:
+        logger.debug("SLACK_HANDOFF_WEBHOOK_URL unset; skipping the handoff alert")
+        return
+    if session is None:
+        return
+    try:
+        payload = {"text": _handoff_slack_text(db, session, reason, description)}
+        async with httpx.AsyncClient(timeout=SLACK_TIMEOUT_SECONDS) as client:
+            response = await client.post(url, json=payload)
+        if response.status_code >= 400:
+            logger.warning(
+                f"Slack handoff alert rejected with HTTP {response.status_code}")
+    except Exception as e:
+        logger.error(f"Slack handoff alert failed: {e}")
+
+
 async def route_session_to_human(
     db: Session,
     session,
@@ -161,4 +274,5 @@ async def route_session_to_human(
             )
 
     await notify_customer(db, session, QUEUED_FOR_HUMAN_NOTICE)
+    await notify_handoff_slack(db, session, reason=reason, description=description)
     return True

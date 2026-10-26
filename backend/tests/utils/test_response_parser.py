@@ -221,8 +221,56 @@ class TestCreateBasicChatResponse:
         """Test creating response with direct request"""
         message = "Connect to agent DIRECT_REQUEST"
         result = create_basic_chat_response(message)
-        
+
         assert isinstance(result, ChatResponse)
         assert result.message == message
         assert result.transfer_to_human is True
-        assert result.end_chat is False 
+        assert result.end_chat is False
+
+
+class TestHandoffProseFallback:
+    """A provider that writes the handoff in prose must still set the flag —
+    and an offer to have the team reach out must not."""
+
+    @pytest.mark.parametrize("message", [
+        "I'm transferring you to a human now.",
+        "Connecting you with a human from our team.",
+        "I'm handing you over to a human agent.",
+        "Transferindo você para um humano agora.",
+        "Vou te passar para um humano, só um instante.",
+    ])
+    def test_explicit_handoff_statement_sets_the_flag(self, message):
+        result = parse_response_content(message)
+
+        assert result.transfer_to_human is True
+        assert result.transfer_reason.value == "DIRECT_REQUEST"
+
+    @pytest.mark.parametrize("message", [
+        "The team will reach out to you shortly.",
+        "I'll have the team contact you by email.",
+        "Thanks! Someone will be in touch.",
+        "Vou pedir para a equipe entrar em contato com você.",
+    ])
+    def test_lead_capture_phrasing_is_not_a_handoff(self, message):
+        result = parse_response_content(message)
+
+        assert result.transfer_to_human is False
+
+    def test_a_negated_statement_is_not_a_handoff(self):
+        result = parse_response_content(
+            "I am unable to help with that; connecting you with a human is not possible.")
+
+        assert result.transfer_to_human is False
+
+    def test_a_negated_handoff_verb_is_not_a_handoff(self):
+        result = parse_response_content("I'm not transferring you to a human right now.")
+
+        assert result.transfer_to_human is False
+
+    def test_a_structured_transfer_keeps_its_own_reason(self):
+        result = parse_response_content(
+            '{"message": "Transferring you to a human now.", '
+            '"transfer_to_human": true, "transfer_reason": "KNOWLEDGE_GAP", '
+            '"end_chat": false, "request_rating": false, "create_ticket": false}')
+
+        assert result.transfer_reason.value == "KNOWLEDGE_GAP" 

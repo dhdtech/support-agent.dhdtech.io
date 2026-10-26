@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     SLACK_CLIENT_ID: str = os.getenv("SLACK_CLIENT_ID", "")
     SLACK_CLIENT_SECRET: str = os.getenv("SLACK_CLIENT_SECRET", "")
     SLACK_SIGNING_SECRET: str = os.getenv("SLACK_SIGNING_SECRET", "")
+    # Incoming webhook for handoff alerts. Empty disables the alert; the
+    # handoff itself is unaffected either way.
+    SLACK_HANDOFF_WEBHOOK_URL: str = os.getenv("SLACK_HANDOFF_WEBHOOK_URL", "")
 
     # Jira. Unlike the others the redirect URI IS configured, because it must
     # match the callback registered on the Atlassian app exactly. Self-hosters

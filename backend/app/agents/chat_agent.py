@@ -47,7 +47,7 @@ from datetime import datetime
 from app.repositories.jira import JiraRepository
 from app.tools.jira_toolkit import JiraTools
 from app.tools.shopify_toolkit import ShopifyTools
-from app.utils.response_parser import parse_response_content
+from app.utils.response_parser import apply_handoff_fallback, parse_response_content
 from app.repositories.agent_shopify_config_repository import AgentShopifyConfigRepository
 import re
 import asyncio
@@ -120,6 +120,74 @@ def build_groq_response_tool(capture: dict):
     )
 
 
+# A model that writes "I'm transferring you to a human" in prose can leave the
+# structured flag false, and then the handoff never happens. A real tool makes
+# the handoff an action the model takes, not a sentence it can write.
+_TRANSFER_TOOL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reason": {
+            "type": "string",
+            "description": (
+                "Why the visitor needs a human. One of: "
+                + ", ".join(t.value for t in TransferReasonType)
+                + ". DIRECT_REQUEST when unsure."
+            ),
+        },
+        "description": {
+            "type": "string",
+            "description": "One-line summary for the human taking over.",
+        },
+    },
+    "required": [],
+}
+
+# Providers that accept tool calls through agno. A reply from any other model
+# is still covered by the prose fallback in response_parser.
+_TOOL_CALLING_MODEL_TYPES = frozenset({
+    "OPENAI", "OPENAI_COMPATIBLE", "CHATTERMATE", "ANTHROPIC", "DEEPSEEK",
+    "GOOGLE", "GOOGLEVERTEX", "GROQ", "MISTRAL", "XAI", "OLLAMA",
+})
+
+
+def build_transfer_tool(capture: dict):
+    """Return an agno tool whose call records a handoff into `capture`."""
+    from agno.tools.function import Function
+
+    def _record(reason: str = None, description: str = None):
+        capture.clear()
+        capture.update({"reason": reason, "description": description})
+        return "Handoff recorded. Tell the visitor a teammate will take over."
+
+    return Function(
+        name="transfer_to_human",
+        description=(
+            "Hand this conversation to a human teammate. Call it the moment you "
+            "decide the visitor needs a person; do not only say so in your reply."
+        ),
+        parameters=_TRANSFER_TOOL_SCHEMA,
+        entrypoint=_record,
+        skip_entrypoint_processing=True,
+    )
+
+
+def apply_transfer_capture(response_content: ChatResponse, capture: dict) -> ChatResponse:
+    """A transfer tool call decides the handoff, whatever the reply said."""
+    if not capture:
+        return response_content
+    valid_reasons = {t.value for t in TransferReasonType}
+    reason = str(capture.get("reason") or "").strip().upper()
+    response_content.transfer_to_human = True
+    response_content.transfer_reason = (
+        TransferReasonType(reason) if reason in valid_reasons
+        else TransferReasonType.DIRECT_REQUEST
+    )
+    description = str(capture.get("description") or "").strip()
+    if description:
+        response_content.transfer_description = description
+    return response_content
+
+
 # Shared implementations live in app.agents.structured_output (also used by the
 # FAQ generator); keep the private aliases so existing call sites and tests
 # don't churn.
@@ -136,10 +204,11 @@ def _build_chat_response_from_capture(capture: dict) -> ChatResponse:
     """
     cleaned = {k: v for k, v in capture.items() if v is not None}
     try:
-        return ChatResponse(**cleaned)
+        return apply_handoff_fallback(ChatResponse(**cleaned))
     except Exception as e:
         logger.error(f"Groq json-tool args failed ChatResponse validation: {e}; args={cleaned}")
-        return ChatResponse(message=str(cleaned.get("message") or "").strip() or "No response generated")
+        return apply_handoff_fallback(ChatResponse(
+            message=str(cleaned.get("message") or "").strip() or "No response generated"))
 
 
 _EMPTY_TURN_FALLBACK = (
@@ -524,6 +593,17 @@ class ChatAgent(ChatAgentMCPMixin):
             self.tools.extend(self.mcp_tools)
             logger.debug(f"Added {len(self.mcp_tools)} MCP tools to agent")
 
+        # Handoff tool: registered only when the toggle is on and the provider
+        # accepts tool calls, so the model's decision becomes an action the
+        # turn can read rather than prose it may contradict.
+        self._transfer_capture = {}
+        self._transfer_tool_registered = bool(
+            self.transfer_to_human
+            and (model_type or "").upper() in _TOOL_CALLING_MODEL_TYPES
+        )
+        if self._transfer_tool_registered:
+            self.tools.append(build_transfer_tool(self._transfer_capture))
+
         if self.agent_data:
             # Define end chat instructions to avoid long lines
             end_chat_with_rating = (
@@ -600,6 +680,11 @@ Keep your responses concise and focused. Provide clear, actionable information i
                 6. The customer needs to perform an action that you cannot assist with
                 
                 To transfer to a human, set transfer_to_human to true in your response and provide a transfer_reason and transfer_description.
+                """
+                if self._transfer_tool_registered:
+                    system_message += """
+                Call the transfer_to_human tool to perform the handoff. Saying you are
+                transferring without calling it leaves the conversation with you.
                 """
             else:
                 # Scoped to THIS conversation on purpose. Stated as a flat
@@ -982,6 +1067,7 @@ Keep your responses concise and focused. Provide clear, actionable information i
 
             # Get AI response WITHOUT storing user message
             self._groq_json_capture.clear()
+            self._transfer_capture.clear()
             try:
                 response = await asyncio.wait_for(
                     self.agent.arun(
@@ -1019,6 +1105,8 @@ Keep your responses concise and focused. Provide clear, actionable information i
                 else:
                     response_content = parse_response_content(response)
 
+            response_content = apply_transfer_capture(
+                response_content, self._transfer_capture)
             response_content = ensure_nonempty_message(response_content)
             logger.debug(f"Response content: {response_content}")
 
@@ -1164,8 +1252,8 @@ Keep your responses concise and focused. Provide clear, actionable information i
         
         # Update session with transfer details
         session_repo = SessionToAgentRepository(db)
-        session_repo.update_session(
-            session_id, 
+        transferred = session_repo.update_session(
+            session_id,
             {
                 "status": "TRANSFERRED",
                 "transfer_reason": transfer_reason,
@@ -1173,7 +1261,16 @@ Keep your responses concise and focused. Provide clear, actionable information i
                 "group_id": group_id
             }
         )
-        
+        if transferred:
+            # Same operator alert the dashboard's own handoff sends.
+            from app.services.human_routing import notify_handoff_slack
+            await notify_handoff_slack(
+                db,
+                session_repo.get_session(session_id),
+                reason=transfer_reason,
+                description=transfer_description,
+            )
+
         # Notify the target group's members who haven't muted transfers
         users = db.query(User).join(user_groups).filter(user_groups.c.group_id == group_id).all()
 
@@ -1367,6 +1464,7 @@ Keep your responses concise and focused. Provide clear, actionable information i
 
                 # Get AI response
                 self._groq_json_capture.clear()
+                self._transfer_capture.clear()
                 _salvaged_content = None
                 try:
                     response = await asyncio.wait_for(
@@ -1419,6 +1517,8 @@ Keep your responses concise and focused. Provide clear, actionable information i
                 # clear anything the LLM may have produced.
                 response_content.request_contact = False
 
+                response_content = apply_transfer_capture(
+                    response_content, self._transfer_capture)
                 response_content = ensure_nonempty_message(response_content)
                 logger.debug(f"Response content: {response_content}")
 

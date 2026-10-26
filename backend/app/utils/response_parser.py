@@ -18,9 +18,79 @@ import json
 import re
 from typing import Any, Dict, Optional, Union
 from app.core.logger import get_logger
-from app.models.schemas.chat import ChatResponse
+from app.models.schemas.chat import ChatResponse, TransferReasonType
 
 logger = get_logger(__name__)
+
+# A model can announce a handoff in prose while leaving the structured flag
+# false. These match an explicit statement that the transfer is happening now
+# — "transferring you to a human", "vou te passar para um humano" — never an
+# offer to have someone reach out, which is lead capture, not a handoff.
+_HANDOFF_STATEMENT = re.compile(
+    r"(?:"
+    r"\btransferring\s+(?:you|this\s+(?:chat|conversation))\s+(?:to|over\s+to)\s+"
+    r"(?:(?:a|an|one\s+of\s+our|our)\s+)?(?:human|person|teammate|team\s+member|agent)\b"
+    r"|\bconnecting\s+you\s+(?:with|to)\s+"
+    r"(?:(?:a|an|one\s+of\s+our|our)\s+)?(?:human|person|teammate|team\s+member|agent)\b"
+    r"|\bhanding\s+(?:you|this\s+(?:chat|conversation))\s+over\s+to\s+"
+    r"(?:(?:a|an|one\s+of\s+our|our)\s+)?(?:human|person|teammate|team\s+member|agent)\b"
+    r"|\btransferindo\s+(?:voc[eê]|esta\s+conversa|esse\s+chat)\s+para\s+"
+    r"(?:(?:um|uma)\s+)?(?:humano|atendente|pessoa)\b"
+    r"|\b(?:vou|estou|irei)\s+(?:te|voc[eê])\s+(?:passar|transferir|encaminhar)\s+para\s+"
+    r"(?:(?:um|uma)\s+)?(?:humano|atendente|pessoa)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+# A match inside a clause that says the handoff cannot happen is not a handoff.
+_HANDOFF_NEGATION = re.compile(
+    r"\b(?:cannot|can't|can\s+not|unable\s+to|not\s+able\s+to|not\s+possible|"
+    r"not\s+(?:transferring|connecting|handing)|"
+    r"n[aã]o\s+posso|n[aã]o\s+consigo|n[aã]o\s+é\s+possível|"
+    r"n[aã]o\s+(?:estou|vou)\s+(?:te\s+)?(?:passar|transferir|encaminhar))\b",
+    re.IGNORECASE,
+)
+
+# How far around a match the negation is looked for. Wide enough for
+# "connecting you with a human is not possible", narrow enough that a negation
+# in an unrelated clause of the same sentence does not veto a real handoff.
+_NEGATION_WINDOW = 80
+
+
+def announces_handoff(text: Optional[str]) -> bool:
+    """True when the reply states that a human handoff is under way.
+
+    Sentences are checked one at a time so a negation in an earlier clause
+    (\"I can't transfer you to a human. I'm transferring you now.\") cannot
+    mask a later statement, and a negation attached to the matching clause
+    does.
+    """
+    if not text:
+        return False
+    for sentence in re.split(r'(?<=[.!?;\n])', text):
+        match = _HANDOFF_STATEMENT.search(sentence)
+        if not match:
+            continue
+        window = sentence[
+            max(0, match.start() - _NEGATION_WINDOW):match.end() + _NEGATION_WINDOW
+        ]
+        if not _HANDOFF_NEGATION.search(window):
+            return True
+    return False
+
+
+def apply_handoff_fallback(response: ChatResponse) -> ChatResponse:
+    """Force the structured flag when the reply itself announces the handoff.
+
+    Only fires when the model left the flag false, so a structured transfer
+    keeps its own reason and description.
+    """
+    if not response.transfer_to_human and announces_handoff(response.message):
+        logger.warning(
+            "Reply announced a human handoff with transfer_to_human false; setting it")
+        response.transfer_to_human = True
+        response.transfer_reason = TransferReasonType.DIRECT_REQUEST
+    return response
 
 def parse_response_content(response: Any) -> ChatResponse:
     """
@@ -69,14 +139,15 @@ def parse_response_content(response: Any) -> ChatResponse:
                 response_content = response
     except Exception as e:
         logger.error(f"Error in parse_response_content: {e}")
-        return create_basic_chat_response(str(response) if response else "Error processing response")
-    
+        return apply_handoff_fallback(
+            create_basic_chat_response(str(response) if response else "Error processing response"))
+
     # If we still don't have a proper response_content, create a basic one
     if not isinstance(response_content, ChatResponse):
         text_content = str(response_content) if response_content else "No response generated"
         response_content = create_basic_chat_response(text_content)
-    
-    return response_content
+
+    return apply_handoff_fallback(response_content)
 
 def extract_json_from_text(text: str) -> ChatResponse:
     """
