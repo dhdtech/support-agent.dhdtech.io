@@ -112,6 +112,7 @@ export function useWidgetSocket() {
     let onWorkflowStateCallback: ((data: any) => void) | null = null
     let onWorkflowProceededCallback: ((data: any) => void) | null = null
     let onSessionStateCallback: ((data: SessionState) => void) | null = null
+    let onAgentMessageCallback: ((data: any) => void) | null = null
     // The server announces the conversation the moment the socket connects, which is
     // before the widget has finished starting up and registered its listener - so the
     // last announcement is held and replayed to a late subscriber.
@@ -259,6 +260,14 @@ export function useWidgetSocket() {
                 }
                 
                 messages.value.push(agentMessage)
+
+                // Sound, badge and notification. A failing alert must never cost
+                // the visitor the reply, so nothing it does escapes into the socket.
+                try {
+                    onAgentMessageCallback?.(data)
+                } catch (error) {
+                    console.error('Agent message alert failed:', error)
+                }
             // UPDATED CHECK: Look for the shopify_output object and products array
             } else if (data.shopify_output && typeof data.shopify_output === 'object' && data.shopify_output.products) {
                 // Handle structured Shopify product data
@@ -406,6 +415,11 @@ export function useWidgetSocket() {
     const onSessionState = (callback: (data: SessionState) => void) => {
         onSessionStateCallback = callback
         if (lastSessionState) callback(lastSessionState)
+    }
+
+    // Register the alert callback for live human-agent replies.
+    const onAgentMessage = (callback: (data: any) => void) => {
+        onAgentMessageCallback = callback
     }
 
     // Register workflow state callback
@@ -747,6 +761,7 @@ export function useWidgetSocket() {
         onTakeoverCallback = null
         onWorkflowStateCallback = null
         onWorkflowProceededCallback = null
+        onAgentMessageCallback = null
     }
 
     return {
@@ -766,6 +781,7 @@ export function useWidgetSocket() {
         humanAgent,
         onTakeover,
         onSessionState,
+        onAgentMessage,
         submitRating,
         currentForm,
         submitForm,

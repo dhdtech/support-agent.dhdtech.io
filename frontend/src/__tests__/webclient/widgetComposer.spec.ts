@@ -53,6 +53,7 @@ vi.mock('@/composables/useWidgetSocket', () => ({
         cleanup: vi.fn(),
         onTakeover: vi.fn(),
         onSessionState: vi.fn(),
+        onAgentMessage: vi.fn(),
         submitRating: vi.fn(),
         submitForm: vi.fn(),
         getWorkflowState: vi.fn(),

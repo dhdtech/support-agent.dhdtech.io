@@ -18,10 +18,12 @@ import { ref, watch, onMounted, onUnmounted, type Ref } from 'vue'
 import { postToHost } from '../webclient/host-bridge'
 
 /**
- * Tracks unread agent/bot messages that arrive while the widget is minimized and
- * reports the running count to the embedder (which renders it on the launcher
- * badge). The embedder drives visibility via `WIDGET_VISIBILITY` messages and
- * shows the nudge count until the chat is first opened, then this unread count.
+ * Tracks unread replies that arrive while the widget is minimized and reports the
+ * running count to the embedder (which renders it on the launcher badge). Bot
+ * replies are counted here; human-agent replies are counted by useWidgetAttention,
+ * which also knows whether the tab is hidden. The embedder drives visibility via
+ * `WIDGET_VISIBILITY` messages and shows the nudge count until the chat is first
+ * opened, then this unread count.
  */
 export function useUnreadBadge(messages: Ref<any[]>) {
     const visible = ref(true)
@@ -31,26 +33,38 @@ export function useUnreadBadge(messages: Ref<any[]>) {
         postToHost({ type: 'UNREAD_COUNT', count: unread })
     }
 
+    /** Count one unread reply. Human-agent replies arrive through useWidgetAttention. */
+    const increment = () => {
+        unread += 1
+        post()
+    }
+
+    const reset = () => {
+        if (unread === 0) return
+        unread = 0
+        post()
+    }
+
     const onMessage = (e: MessageEvent) => {
         if (e?.data?.type !== 'WIDGET_VISIBILITY') return
         visible.value = !!e.data.open
         // Opening the chat clears the unread count.
-        if (visible.value && unread !== 0) {
-            unread = 0
-            post()
-        }
+        if (visible.value) reset()
     }
 
-    // Count agent/bot replies that land while the chat is closed.
+    // Bot replies landing while the chat is closed. Human-agent replies are counted
+    // by useWidgetAttention, which also knows whether the tab is hidden — counting
+    // them here too would report every one of them twice.
     watch(() => messages.value.length, (len, prev) => {
         if (len <= (prev ?? 0) || visible.value) return
         const m = messages.value[len - 1]
-        if (m && (m.message_type === 'bot' || m.message_type === 'agent')) {
-            unread += 1
-            post()
+        if (m && m.message_type === 'bot') {
+            increment()
         }
     })
 
     onMounted(() => window.addEventListener('message', onMessage))
     onUnmounted(() => window.removeEventListener('message', onMessage))
+
+    return { increment, reset }
 }

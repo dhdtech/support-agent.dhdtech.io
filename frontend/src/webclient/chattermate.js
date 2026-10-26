@@ -1781,6 +1781,13 @@ window.chattermateConfig;
       // Only the widget iframe may talk to the loader. Both frames can be
       // null-origin (srcdoc), so identity of the source window is the check.
       if (!widgetFrameWindow || event.source !== widgetFrameWindow) return
+      // A notification click asks the chat to come forward: focus the tab and open
+      // the window the visitor was notified about.
+      if (event.data.type === 'WIDGET_OPEN') {
+        window.focus()
+        withController(function () { controller.open() })
+        return
+      }
       if (event.data.type === 'UNREAD_COUNT') {
         config.unreadCount = Math.max(0, parseInt(event.data.count, 10) || 0)
         updateBadge()

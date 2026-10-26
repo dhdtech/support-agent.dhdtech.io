@@ -34,6 +34,7 @@ import { useWidgetSocket } from '../composables/useWidgetSocket'
 import { useWidgetCustomization } from '../composables/useWidgetCustomization'
 import { useTypewriter } from '../composables/useTypewriter'
 import { useUnreadBadge } from '../composables/useUnreadBadge'
+import { useWidgetAttention } from '../composables/useWidgetAttention'
 import { useConversationToken, IDENTITY_EXPIRED_CODE, sanitizeToken } from '../composables/useConversationToken'
 import {
     NEW_CHAT_CONFIRM_TIMEOUT_MS,
@@ -92,15 +93,23 @@ const {
     currentSessionId,
     setToken,
     setWidgetId,
-    onSessionState
+    onSessionState,
+    onAgentMessage
 } = useWidgetSocket()
 
 // Client-side typewriter reveal for live agent/bot replies; keep the view pinned
 // to the bottom as text grows.
 const { displayText, isStreaming } = useTypewriter(messages, () => nextTick(() => scrollToBottom()))
 
-// Report unread agent messages (received while minimized) to the embedder badge.
-useUnreadBadge(messages)
+// Report unread messages to the embedder badge, and alert the visitor when a
+// human-agent reply lands somewhere they are not looking.
+const unreadBadge = useUnreadBadge(messages)
+const attention = useWidgetAttention({
+    isWidgetOpen: () => hostVisible.value,
+    onUnread: unreadBadge.increment,
+    onClear: unreadBadge.reset
+})
+onAgentMessage(attention.handleAgentMessage)
 
 const newMessage = ref('')
 const isExpanded = ref(true)
@@ -444,6 +453,10 @@ const pendingSend = ref(false)
 // Update the sendMessage function
 const sendMessage = async () => {
     if (!newMessage.value.trim() && uploadedAttachments.value.length === 0) return
+
+    // Sending is an explicit gesture inside the frame, which is what browsers
+    // require before an AudioContext may play or a notification prompt may show.
+    attention.prime()
 
     if (loading.value && hasStartedChat.value) {
         pendingSend.value = true
@@ -1334,6 +1347,9 @@ window.addEventListener('message', (event) => {
         // autofocus its input while the widget is still hidden — the iframe is
         // created eagerly on page load, so focus would leave the host page.
         hostVisible.value = !!event.data.open
+        // Opening the launcher is the gesture that may start audio and ask for
+        // notification permission. Never on load, never blocking.
+        if (hostVisible.value) attention.prime()
     }
     if (event.data.type === 'WIDGET_DISPLAY') {
         // The embed loader's final display geometry (developer options merged with
@@ -1599,6 +1615,7 @@ onUnmounted(() => {
     stopTokenLifecycle()
     disarmNewChat()
 
+    attention.stop()
     cleanup()
 })
 
