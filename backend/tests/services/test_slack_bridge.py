@@ -38,7 +38,11 @@ from app.core.config import settings
 from app.database import get_db
 from app.models.chat_history import ChatHistory
 from app.models.organization import Organization
-from app.models.session_to_agent import SessionStatus, SessionToAgent
+from app.models.session_to_agent import (
+    EndChatReasonType,
+    SessionStatus,
+    SessionToAgent,
+)
 from app.models.user import User, UserGroup
 from app.repositories.channels import ChannelAccountRepository
 from app.repositories.session_to_agent import SessionToAgentRepository
@@ -752,3 +756,143 @@ async def test_a_failing_tick_is_swallowed_and_the_loop_keeps_running(monkeypatc
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+# --- ending the conversation from the thread --------------------------------
+# A thread reply that is a close command ends the conversation through the
+# same repository call the dashboard uses, instead of being sent to the
+# visitor. Both inbound paths reach this through handle_operator_reply.
+
+async def _run_command(db, monkeypatch, text, slack_ts="1720000001.000200"):
+    monkeypatch.setattr(slack_bridge, "SessionLocal", lambda: db)
+    monkeypatch.setattr(slack_bridge, "get_adapter", lambda *_: _operator_adapter(None))
+    deliver = AsyncMock(return_value=DeliveryResult(ok=True))
+    monkeypatch.setattr(slack_bridge, "deliver_to_customer", deliver)
+    post = AsyncMock(return_value={"ok": True, "ts": "1720000002.000300"})
+    monkeypatch.setattr(slack_bridge, "slack_api", post)
+    settled = await slack_bridge.handle_operator_reply(
+        TEAM, BRIDGE, THREAD, "U0OPERATOR", text, slack_ts)
+    return settled, deliver, post
+
+
+@pytest.mark.asyncio
+async def test_end_command_closes_the_session_and_tells_both_sides(
+        db, bridge_session, bridged, slack_account, monkeypatch):
+    settled, deliver, post = await _run_command(db, monkeypatch, "/end")
+
+    assert settled is True
+    stored = SessionToAgentRepository(db).get_session(bridge_session.session_id)
+    assert stored.status == SessionStatus.CLOSED
+    assert stored.end_chat_reason == EndChatReasonType.CUSTOMER_REQUEST
+
+    # The command itself is never a message in the conversation.
+    assert db.query(ChatHistory).count() == 0
+
+    deliver.assert_awaited_once()
+    payload = deliver.await_args.args[2]
+    assert payload["message"] == slack_bridge.CLOSING_MESSAGE
+    assert payload["type"] == "agent_message"
+    assert payload["session_id"] == str(bridge_session.session_id)
+
+    post.assert_awaited_once()
+    method, token, body = post.await_args.args
+    assert method == "chat.postMessage"
+    assert token == "xoxb-test"
+    assert body["channel"] == BRIDGE
+    assert body["thread_ts"] == THREAD
+    assert body["text"] == slack_bridge.CLOSE_CONFIRMATION
+
+
+@pytest.mark.parametrize("text", ["!end", "END", "  /end  ", "End"])
+@pytest.mark.asyncio
+async def test_every_end_command_spelling_closes(
+        db, bridge_session, bridged, slack_account, monkeypatch, text):
+    settled, deliver, post = await _run_command(db, monkeypatch, text)
+
+    assert settled is True
+    stored = SessionToAgentRepository(db).get_session(bridge_session.session_id)
+    assert stored.status == SessionStatus.CLOSED
+    assert db.query(ChatHistory).count() == 0
+    deliver.assert_awaited_once()
+    post.assert_awaited_once()
+
+
+@pytest.mark.parametrize("text", ["end of story", "ended", "the end", "/end please"])
+@pytest.mark.asyncio
+async def test_ordinary_text_containing_end_is_still_a_message(
+        db, bridge_session, bridged, slack_account, monkeypatch, text):
+    settled, deliver, post = await _run_command(db, monkeypatch, text)
+
+    assert settled is True
+    stored = SessionToAgentRepository(db).get_session(bridge_session.session_id)
+    assert stored.status == SessionStatus.TRANSFERRED
+    assert deliver.await_args.args[2]["message"] == text
+    assert db.query(ChatHistory).count() == 1
+    post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_second_end_does_not_message_the_visitor_again(
+        db, bridge_session, bridged, slack_account, monkeypatch):
+    await _run_command(db, monkeypatch, "/end")
+    settled, deliver, post = await _run_command(
+        db, monkeypatch, "/end", slack_ts="1720000003.000400")
+
+    assert settled is True
+    deliver.assert_not_awaited()
+    # The operator still sees the command was accepted.
+    post.assert_awaited_once()
+    assert db.query(ChatHistory).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_end_on_a_session_closed_in_the_dashboard_is_a_visitor_no_op(
+        db, bridge_session, bridged, slack_account, monkeypatch):
+    SessionToAgentRepository(db).close_session(bridge_session.session_id)
+
+    settled, deliver, post = await _run_command(db, monkeypatch, "/end")
+
+    assert settled is True
+    deliver.assert_not_awaited()
+    post.assert_awaited_once()
+    assert db.query(ChatHistory).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_the_poll_path_ends_the_conversation_the_same_way(
+        db, bridge_session, bridged, slack_account, monkeypatch):
+    calls, deliver = _poll_env(db, monkeypatch, [_reply(text="/end")])
+
+    await slack_bridge.poll_bridge_threads()
+
+    stored = SessionToAgentRepository(db).get_session(bridge_session.session_id)
+    assert stored.status == SessionStatus.CLOSED
+    assert stored.end_chat_reason == EndChatReasonType.CUSTOMER_REQUEST
+    assert db.query(ChatHistory).count() == 0
+
+    deliver.assert_awaited_once()
+    assert deliver.await_args.args[2]["message"] == slack_bridge.CLOSING_MESSAGE
+
+    # One read of the thread, one confirmation back into it.
+    methods = [call.args[0] for call in calls.await_args_list]
+    assert methods == ["conversations.replies", "chat.postMessage"]
+    confirmation = calls.await_args_list[-1].args[2]
+    assert confirmation["thread_ts"] == THREAD
+    assert confirmation["text"] == slack_bridge.CLOSE_CONFIRMATION
+
+    db.refresh(bridged)
+    assert bridged.last_processed_ts == "1720000001.000200"
+
+
+def test_the_webhook_dispatches_an_end_command_to_the_same_handler(
+        db, client, bridged, monkeypatch):
+    monkeypatch.setattr(settings, "SLACK_SIGNING_SECRET", SECRET)
+    monkeypatch.setattr(settings, "SLACK_BRIDGE_CHANNEL_ID", BRIDGE)
+    handler = MagicMock()
+    monkeypatch.setattr("app.api.webhooks.slack.handle_operator_reply", handler)
+
+    response = _post(client, _reply_event(text="/end"))
+
+    assert response.status_code == 200
+    handler.assert_called_once_with(
+        TEAM, BRIDGE, THREAD, "U0OPERATOR", "/end", "1720000001.000200")

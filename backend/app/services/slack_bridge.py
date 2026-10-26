@@ -19,7 +19,9 @@ limitations under the License.
 The handoff notice is posted to one Slack channel with the workspace's bot
 token so the returned `ts` can be stored; an operator replying in that thread
 becomes an agent message in the originating chat, and the visitor's later
-messages are mirrored into the same thread. The one-way incoming webhook stays
+messages are mirrored into the same thread. A reply that is exactly `/end`,
+`!end` or `end` closes the conversation instead, through the same repository
+call the dashboard's end-chat route makes. The one-way incoming webhook stays
 as the fallback whenever the bridge is unset or unavailable.
 
 Slack contract, read from docs.slack.dev on 2026-10-26:
@@ -46,7 +48,7 @@ from app.database import SessionLocal
 from app.models.agent import agent_usergroup
 from app.models.channels import ChannelAccount, ChannelType, SlackHandoffThread
 from app.models.chat_history import ChatHistory
-from app.models.session_to_agent import SessionStatus
+from app.models.session_to_agent import EndChatReasonType, SessionStatus
 from app.models.user import User, user_groups
 from app.repositories.channels import ChannelAccountRepository
 from app.repositories.chat import ChatRepository
@@ -64,6 +66,16 @@ logger = get_logger(__name__)
 # and one call per bridged thread per tick.
 POLL_INTERVAL_SECONDS = 5
 REPLIES_PAGE_LIMIT = 100
+
+# An operator reply that closes the conversation instead of reaching the
+# visitor. Slack has no way to define a slash command without app
+# configuration, so the command is plain thread text.
+END_COMMANDS = frozenset({'/end', '!end', 'end'})
+CLOSING_MESSAGE = (
+    "This conversation has been closed. Thanks for reaching out — "
+    "reply here to start a new one."
+)
+CLOSE_CONFIRMATION = "Conversation closed."
 
 # Set the first time a tick finds no active account, so an idle poller logs at
 # debug once rather than every five seconds.
@@ -296,6 +308,51 @@ def _fallback_local_user(db: Session, agent_id, organization_id):
     return None, ''
 
 
+async def _close_from_slack(
+    db: Session, session_record, account: ChannelAccount, channel_id: str,
+    thread_ts: str,
+) -> None:
+    """Close the session the dashboard closes, then tell both sides.
+
+    `close_session` is the same call the widget's end-chat route makes, so the
+    status and end-chat reason land where the dashboard and analytics read
+    them. A session that is already CLOSED is left alone and the visitor gets
+    nothing; the operator still gets the Slack confirmation.
+    """
+    if session_record.status != SessionStatus.CLOSED:
+        SessionToAgentRepository(db).close_session(
+            session_id=session_record.session_id,
+            reason=EndChatReasonType.CUSTOMER_REQUEST.value,
+            description="Closed from Slack by an operator",
+        )
+        result = await deliver_to_customer(db, session_record, {
+            'message': CLOSING_MESSAGE,
+            'type': 'agent_message',
+            'message_type': 'agent',
+            'session_id': str(session_record.session_id),
+            'agent_name': None,
+        })
+        if not result.ok:
+            logger.warning(f"Slack bridge closing message not delivered: {result.reason}")
+
+    token = _bot_token(db, account)
+    if not token:
+        logger.warning(
+            f"Slack account {account.id} has no bot token; close not confirmed")
+        return
+    try:
+        data = await slack_api('chat.postMessage', token, {
+            'channel': channel_id,
+            'thread_ts': thread_ts,
+            'text': CLOSE_CONFIRMATION,
+            'unfurl_links': False,
+        })
+        if not data.get('ok'):
+            logger.warning(f"Slack bridge close confirmation rejected: {data.get('error')}")
+    except Exception as e:
+        logger.error(f"Slack bridge close confirmation failed: {str(e)}")
+
+
 async def handle_operator_reply(
     team_id: str,
     channel_id: str,
@@ -336,6 +393,12 @@ async def handle_operator_reply(
         session_record = SessionToAgentRepository(db).get_session(thread.session_id)
         if session_record is None:
             return False
+
+        if reply.lower() in END_COMMANDS:
+            # A command, not a message: no chat_history row is written for it.
+            await _close_from_slack(
+                db, session_record, account, channel_id, thread_ts)
+            return True
 
         local_user = None
         matched_by = ''
