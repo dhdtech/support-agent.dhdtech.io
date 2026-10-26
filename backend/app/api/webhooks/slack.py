@@ -30,6 +30,7 @@ from app.services.slack_events import (
     handle_assistant_thread_started,
     publish_agent_home,
 )
+from app.services.slack_bridge import bridge_thread_for_event, handle_operator_reply
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -156,6 +157,26 @@ async def slack_webhook(
     # App Home / Assistant surfaces (welcome, home cards) — also not messages.
     if event_type in APP_SURFACE_EVENT_TYPES:
         _dispatch_app_surface_event(event, payload.get("team_id", ""), account_repo, background_tasks)
+        return {"status": "ok"}
+
+    # Two-way bridge: a plain reply inside a handoff thread is an operator
+    # answering the visitor. Intercepted before parse_inbound, which would
+    # otherwise drop these channel messages as not being a mention or a DM.
+    bridge_thread = bridge_thread_for_event(db, event)
+    if bridge_thread is not None:
+        # event_id is globally unique; Slack redelivers on a slow ack.
+        if is_duplicate_message(ChannelType.SLACK.value,
+                                f"bridge:{payload.get('event_id') or event.get('ts')}"):
+            logger.info(f"Skipping duplicate Slack bridge event {payload.get('event_id')}")
+            return {"status": "ok"}
+        background_tasks.add_task(
+            handle_operator_reply,
+            payload.get("team_id", ""),
+            event.get("channel", ""),
+            event.get("thread_ts", ""),
+            str(event.get("user", "")),
+            event.get("text") or "",
+        )
         return {"status": "ok"}
 
     adapter = get_adapter(ChannelType.SLACK.value)

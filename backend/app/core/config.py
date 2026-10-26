@@ -93,6 +93,10 @@ class Settings(BaseSettings):
     # Incoming webhook for handoff alerts. Empty disables the alert; the
     # handoff itself is unaffected either way.
     SLACK_HANDOFF_WEBHOOK_URL: str = os.getenv("SLACK_HANDOFF_WEBHOOK_URL", "")
+    # Two-way bridge. When set, the handoff notice is posted with the bot token
+    # so its channel/ts can be stored and operator replies routed back to the
+    # visitor. Empty keeps the one-way webhook above.
+    SLACK_BRIDGE_CHANNEL_ID: str = os.getenv("SLACK_BRIDGE_CHANNEL_ID", "")
 
     # Jira. Unlike the others the redirect URI IS configured, because it must
     # match the callback registered on the Atlassian app exactly. Self-hosters

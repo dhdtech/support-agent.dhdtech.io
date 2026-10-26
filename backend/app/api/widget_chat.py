@@ -58,6 +58,7 @@ from app.services.human_routing import (
 )
 from app.services.lead_capture import record_lead_from_response
 from app.services.message_delivery import deliver_to_customer
+from app.services.slack_bridge import forward_visitor_message
 from app.repositories.rating import RatingRepository
 from app.services.ticket_csat import record_conversation_rating
 from app.repositories.jira import JiraRepository
@@ -574,6 +575,7 @@ async def handle_widget_chat(sid, data):
                 "agent_id": session['agent_id'],
                 "customer_id": customer_id,
             })
+            await forward_visitor_message(db, session_id, message)
             
             # Attach uploaded files to the user message
             if uploaded_files:
@@ -657,6 +659,7 @@ async def handle_widget_chat(sid, data):
                 "customer_id": customer_id,
                 "user_id": active_session.user_id,
             })
+            await forward_visitor_message(db, session_id, message)
             
             # Attach uploaded files to the user message
             if uploaded_files:
@@ -734,6 +737,7 @@ async def handle_widget_chat(sid, data):
                 "customer_id": customer_id,
                 "user_id": active_session.user_id,
             })
+            await forward_visitor_message(db, session_id, message)
             
             # Attach uploaded files to the user message
             if uploaded_files:

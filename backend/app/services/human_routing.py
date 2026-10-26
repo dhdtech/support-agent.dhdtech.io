@@ -33,6 +33,7 @@ from app.repositories.user import UserRepository
 from app.services.chat_notifications import UNASSIGNED_CHAT_VIEWERS
 from app.services.message_delivery import deliver_to_customer
 from app.services.notifications import ChatNotificationEvent, notify_chat_event
+from app.services.slack_bridge import escape_slack_text, post_handoff_to_bridge
 
 logger = get_logger(__name__)
 
@@ -132,21 +133,6 @@ def _last_visitor_message(db: Session, session_id) -> str:
     return (message or '').strip()
 
 
-def _escape_slack(value) -> str:
-    """Neutralize mrkdwn/links in untrusted text.
-
-    A visitor's own message and profile are rendered in the operator's Slack;
-    without this, a message containing <https://evil|click here> would arrive
-    as a live link.
-    """
-    return (
-        str(value or '')
-        .replace('&', '&amp;')
-        .replace('<', '&lt;')
-        .replace('>', '&gt;')
-    )
-
-
 def _handoff_slack_text(db: Session, session, reason, description) -> str:
     """Slack mrkdwn summary of a chat that is now waiting for a human."""
     agent_name = 'Unknown agent'
@@ -175,13 +161,13 @@ def _handoff_slack_text(db: Session, session, reason, description) -> str:
     )
     lines = [
         "*Chat waiting for a human*",
-        f"*Agent:* {_escape_slack(agent_name)}",
-        f"*Customer:* {_escape_slack(customer_label)}",
-        f"*Reason:* {_escape_slack(reason) or 'not specified'}",
-        f"*Last message:* {_escape_slack(last_message)}",
+        f"*Agent:* {escape_slack_text(agent_name)}",
+        f"*Customer:* {escape_slack_text(customer_label)}",
+        f"*Reason:* {escape_slack_text(reason) or 'not specified'}",
+        f"*Last message:* {escape_slack_text(last_message)}",
     ]
     if description:
-        lines.append(f"*Details:* {_escape_slack(description)}")
+        lines.append(f"*Details:* {escape_slack_text(description)}")
     lines.append(f"<{link}|Open the conversation>")
     return "\n".join(lines)
 
@@ -193,22 +179,31 @@ async def notify_handoff_slack(
     reason: Optional[str] = None,
     description: Optional[str] = None,
 ) -> None:
-    """Post a handoff alert to the configured Slack incoming webhook.
+    """Post a handoff alert to Slack.
 
-    Best-effort by design: an unset URL is a no-op, and a failure, an error
-    status or a timeout is logged and swallowed. The handoff has already
-    happened — an alert must never undo or delay its outcome.
+    Prefers the two-way bridge: posted with the bot token so its ts can be
+    stored and operator replies routed back to the visitor. Falls back to the
+    one-way incoming webhook when the bridge is unset or unavailable.
+
+    Best-effort by design: an unset URL and bridge are a no-op, and a failure,
+    an error status or a timeout is logged and swallowed. The handoff has
+    already happened — an alert must never undo or delay its outcome.
     """
-    url = settings.SLACK_HANDOFF_WEBHOOK_URL
-    if not url:
-        logger.debug("SLACK_HANDOFF_WEBHOOK_URL unset; skipping the handoff alert")
-        return
     if session is None:
         return
+    bridge_channel = settings.SLACK_BRIDGE_CHANNEL_ID
+    url = settings.SLACK_HANDOFF_WEBHOOK_URL
+    if not bridge_channel and not url:
+        logger.debug("No Slack bridge channel or handoff webhook configured; skipping the alert")
+        return
     try:
-        payload = {"text": _handoff_slack_text(db, session, reason, description)}
+        text = _handoff_slack_text(db, session, reason, description)
+        if bridge_channel and await post_handoff_to_bridge(db, session, text):
+            return
+        if not url:
+            return
         async with httpx.AsyncClient(timeout=SLACK_TIMEOUT_SECONDS) as client:
-            response = await client.post(url, json=payload)
+            response = await client.post(url, json={"text": text})
         if response.status_code >= 400:
             logger.warning(
                 f"Slack handoff alert rejected with HTTP {response.status_code}")

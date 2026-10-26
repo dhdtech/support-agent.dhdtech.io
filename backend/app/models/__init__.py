@@ -42,6 +42,7 @@ from app.models.lead_capture import (
 )
 from app.models.channels import (
     ChannelAccount, ChannelType, ChannelConversation, AgentChannelConfig,
+    SlackHandoffThread,
 )
 from app.models.faq_generation_job import (
     FAQGenerationJob, FAQJobType, FAQJobStatus, FAQJobStage,
@@ -106,6 +107,7 @@ __all__ = [
     "ChannelType",
     "ChannelConversation",
     "AgentChannelConfig",
+    "SlackHandoffThread",
     "FAQGenerationJob",
     "FAQJobType",
     "FAQJobStatus",
