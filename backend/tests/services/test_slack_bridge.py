@@ -18,6 +18,7 @@ inside it reaches the visitor, and the visitor's later messages reach the
 operator. Everything else in the bridge channel keeps the old behaviour.
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -342,7 +343,7 @@ def test_the_webhook_dispatches_an_operator_reply(
 
     assert response.status_code == 200
     handler.assert_called_once_with(
-        TEAM, BRIDGE, THREAD, "U0OPERATOR", "On it now")
+        TEAM, BRIDGE, THREAD, "U0OPERATOR", "On it now", "1720000001.000200")
 
 
 @pytest.mark.parametrize("event_overrides", [
@@ -410,3 +411,178 @@ async def test_forwarded_visitor_text_cannot_inject_a_slack_link(
     text = post.await_args.args[2]["text"]
     assert "&lt;https://evil.example|click here&gt;" in text
     assert "<https://evil.example" not in text
+
+
+# --- inbound polling fallback ----------------------------------------------
+# Slack delivers nothing to the events endpoint in production, so the same
+# replies are read from conversations.replies. The stored cursor and the
+# slack_ts marker are what make that safe to retry and safe alongside events.
+
+BOT_USER = "U0BOT"
+
+
+def _poll_env(db, monkeypatch, messages, *, ok=True):
+    """Point the poller at the test database and fake one replies page."""
+    monkeypatch.setattr(settings, "SLACK_BRIDGE_CHANNEL_ID", BRIDGE)
+    monkeypatch.setattr(slack_bridge, "SessionLocal", lambda: db)
+    calls = AsyncMock(return_value={"ok": ok, "messages": messages})
+    monkeypatch.setattr(slack_bridge, "slack_api", calls)
+    deliver = AsyncMock(return_value=DeliveryResult(ok=True))
+    monkeypatch.setattr(slack_bridge, "deliver_to_customer", deliver)
+    monkeypatch.setattr(slack_bridge, "get_adapter",
+                        lambda *_: _operator_adapter(None))
+    return calls, deliver
+
+
+def _reply(ts="1720000001.000200", **overrides):
+    message = {
+        "type": "message",
+        "user": "U0OPERATOR",
+        "text": "On it now",
+        "ts": ts,
+        "thread_ts": THREAD,
+    }
+    message.update(overrides)
+    return message
+
+
+@pytest.mark.asyncio
+async def test_a_polled_reply_is_delivered_and_advances_the_cursor(
+        db, bridge_session, bridged, slack_account, monkeypatch):
+    calls, deliver = _poll_env(db, monkeypatch, [_reply()])
+
+    await slack_bridge.poll_bridge_threads()
+
+    method, token, payload = calls.await_args.args
+    assert method == "conversations.replies"
+    assert token == "xoxb-test"
+    # The first tick starts at the handoff notice and asks for one page.
+    assert payload == {"channel": BRIDGE, "ts": THREAD, "oldest": THREAD,
+                       "limit": 100}
+    assert calls.await_args.kwargs == {"form": True}
+
+    db.refresh(bridged)
+    assert bridged.last_processed_ts == "1720000001.000200"
+
+    message = db.query(ChatHistory).filter(
+        ChatHistory.session_id == bridge_session.session_id).one()
+    assert message.message_type == "agent"
+    assert message.message == "On it now"
+    assert message.attributes["slack_ts"] == "1720000001.000200"
+    deliver.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_reply_leaves_the_cursor_for_the_next_tick(
+        db, bridged, slack_account, monkeypatch):
+    _poll_env(db, monkeypatch, [_reply()])
+    handler = AsyncMock(return_value=False)
+    monkeypatch.setattr(slack_bridge, "handle_operator_reply", handler)
+
+    await slack_bridge.poll_bridge_threads()
+
+    handler.assert_awaited_once()
+    db.refresh(bridged)
+    assert bridged.last_processed_ts is None
+    assert db.query(ChatHistory).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_bot_and_system_messages_are_ignored_but_do_not_block_the_thread(
+        db, bridged, slack_account, monkeypatch):
+    ChannelAccountRepository(db).update_credentials(
+        slack_account, {"access_token": "xoxb-test", "bot_user_id": BOT_USER})
+    handler = AsyncMock(return_value=True)
+    _poll_env(db, monkeypatch, [
+        _reply("1720000001.000100", bot_id="B1", user=BOT_USER, text="bot echo"),
+        _reply("1720000001.000200", subtype="message_changed", text="edited"),
+        _reply("1720000001.000300", user=BOT_USER, text="our own handoff"),
+        _reply("1720000001.000400", text="   "),
+    ])
+    monkeypatch.setattr(slack_bridge, "handle_operator_reply", handler)
+
+    await slack_bridge.poll_bridge_threads()
+
+    handler.assert_not_awaited()
+    assert db.query(ChatHistory).count() == 0
+    db.refresh(bridged)
+    # Skipped messages still move the cursor, or they would block it forever.
+    assert bridged.last_processed_ts == "1720000001.000400"
+
+
+@pytest.mark.asyncio
+async def test_a_reply_delivered_by_event_is_not_delivered_again_by_the_poll(
+        db, bridge_session, bridged, slack_account, monkeypatch):
+    _poll_env(db, monkeypatch, [_reply()])
+
+    # The event path got there first and recorded its Slack ts.
+    await slack_bridge.handle_operator_reply(
+        TEAM, BRIDGE, THREAD, "U0OPERATOR", "On it now", "1720000001.000200")
+    assert db.query(ChatHistory).count() == 1
+
+    await slack_bridge.poll_bridge_threads()
+
+    assert db.query(ChatHistory).count() == 1
+    db.refresh(bridged)
+    assert bridged.last_processed_ts == "1720000001.000200"
+
+
+@pytest.mark.asyncio
+async def test_the_poll_is_a_no_op_when_unconfigured(
+        db, bridged, slack_account, monkeypatch):
+    monkeypatch.setattr(settings, "SLACK_BRIDGE_CHANNEL_ID", "")
+    calls = AsyncMock()
+    monkeypatch.setattr(slack_bridge, "slack_api", calls)
+
+    await slack_bridge.poll_bridge_threads()
+
+    calls.assert_not_awaited()
+    db.refresh(bridged)
+    assert bridged.last_processed_ts is None
+
+
+@pytest.mark.asyncio
+async def test_the_poll_is_a_no_op_without_an_active_account(
+        db, bridged, slack_account, monkeypatch):
+    ChannelAccountRepository(db).set_active(slack_account, False)
+    calls = AsyncMock()
+    monkeypatch.setattr(settings, "SLACK_BRIDGE_CHANNEL_ID", BRIDGE)
+    monkeypatch.setattr(slack_bridge, "SessionLocal", lambda: db)
+    monkeypatch.setattr(slack_bridge, "slack_api", calls)
+
+    await slack_bridge.poll_bridge_threads()
+
+    calls.assert_not_awaited()
+    db.refresh(bridged)
+    assert bridged.last_processed_ts is None
+
+
+@pytest.mark.asyncio
+async def test_the_loop_returns_at_once_when_the_bridge_is_unconfigured(monkeypatch):
+    monkeypatch.setattr(settings, "SLACK_BRIDGE_CHANNEL_ID", "")
+    await asyncio.wait_for(slack_bridge.run_bridge_poller_loop(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_a_failing_tick_is_swallowed_and_the_loop_keeps_running(monkeypatch):
+    monkeypatch.setattr(settings, "SLACK_BRIDGE_CHANNEL_ID", BRIDGE)
+    monkeypatch.setattr(slack_bridge, "POLL_INTERVAL_SECONDS", 0)
+    ticks = 0
+    third_tick = asyncio.Event()
+
+    async def failing_tick():
+        nonlocal ticks
+        ticks += 1
+        if ticks == 3:
+            third_tick.set()
+        raise RuntimeError("slack unreachable")
+
+    monkeypatch.setattr(slack_bridge, "poll_bridge_threads", failing_tick)
+    task = asyncio.create_task(slack_bridge.run_bridge_poller_loop())
+
+    await asyncio.wait_for(third_tick.wait(), timeout=2)
+    assert not task.done()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task

@@ -32,6 +32,7 @@ Slack contract, read from docs.slack.dev on 2026-10-26:
     event subscription and the `channels:history` bot scope.
 """
 
+import asyncio
 from typing import Optional
 from uuid import UUID
 
@@ -43,6 +44,7 @@ from app.core.config import settings
 from app.core.logger import get_logger
 from app.database import SessionLocal
 from app.models.channels import ChannelAccount, ChannelType, SlackHandoffThread
+from app.models.chat_history import ChatHistory
 from app.models.session_to_agent import SessionStatus
 from app.repositories.channels import ChannelAccountRepository
 from app.repositories.chat import ChatRepository
@@ -53,6 +55,17 @@ from app.services.message_delivery import deliver_to_customer
 from app.utils.sanitize import sanitize_message
 
 logger = get_logger(__name__)
+
+# The inbound poll. Slack pushes `message` events only when its Events API can
+# reach the app; polling `conversations.replies` is the fallback that needs no
+# Slack-side configuration. Five seconds is well inside the method's rate tier
+# and one call per bridged thread per tick.
+POLL_INTERVAL_SECONDS = 5
+REPLIES_PAGE_LIMIT = 100
+
+# Set the first time a tick finds no active account, so an idle poller logs at
+# debug once rather than every five seconds.
+_account_absent_logged = False
 
 
 def escape_slack_text(value) -> str:
@@ -87,6 +100,54 @@ def _active_slack_account(db: Session, organization_id) -> Optional[ChannelAccou
 def _bot_token(db: Session, account: ChannelAccount) -> str:
     credentials = ChannelAccountRepository(db).get_credentials(account) or {}
     return credentials.get('access_token') or ''
+
+
+def _ts_after(ts: str, cursor: str) -> bool:
+    """Whether a Slack ts is newer than the stored cursor.
+
+    Slack ts values are decimal-second strings ('1720000001.000200'), so they
+    compare numerically; any malformed value is treated as not newer.
+    """
+    try:
+        return float(ts) > float(cursor)
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_operator_message(message: dict, bot_user_id: str) -> bool:
+    """A plain, human-authored message — never our bot, a bot, or an event.
+
+    Slack marks a bot's own posts with `bot_id` and an edit/delete/join with
+    `subtype`; either one means there is nothing for the operator reply path.
+    """
+    if message.get('bot_id') or message.get('subtype'):
+        return False
+    user = message.get('user')
+    if not user or (bot_user_id and user == bot_user_id):
+        return False
+    return True
+
+
+def _already_delivered(db: Session, session_id, slack_ts: str) -> bool:
+    """Whether this Slack message already became an agent message.
+
+    An operator reply can arrive both as an event and through the poll, so the
+    Slack ts is stored on the message the first path writes and the second path
+    skips it. The read is served by ix_chat_history_session_created and covers
+    only the agent messages of one conversation.
+    """
+    if not slack_ts:
+        return False
+    rows = (
+        db.query(ChatHistory.attributes)
+        .filter(
+            ChatHistory.session_id == session_id,
+            ChatHistory.message_type == 'agent',
+        )
+        .all()
+    )
+    return any((attributes or {}).get('slack_ts') == slack_ts
+               for attributes, in rows)
 
 
 async def post_handoff_to_bridge(db: Session, session, text: str) -> bool:
@@ -203,28 +264,40 @@ async def handle_operator_reply(
     thread_ts: str,
     slack_user_id: str,
     text: str,
-) -> None:
+    slack_ts: str = "",
+) -> bool:
     """Background task: deliver an operator's Slack reply to the visitor.
 
     Opens its own session because the webhook has already acked inside Slack's
     3s budget. The reply is stored as an agent message, the session is taken
     over so the AI stops answering, and the text is pushed to the widget.
+
+    Returns True once the reply is settled — stored and delivered, already
+    stored under this `slack_ts`, or provably undeliverable (empty or unsafe
+    text). False means a retry could still succeed, and the poller leaves its
+    cursor where it was so the next tick tries again.
     """
     db = SessionLocal()
     try:
         reply = (text or '').strip()
         if not reply or not slack_user_id:
-            return
+            return False
         account = ChannelAccountRepository(db).get_by_external_id(
             ChannelType.SLACK.value, team_id)
         if account is None or not account.is_active:
-            return
+            return False
         thread = SlackHandoffThreadRepository(db).get_by_thread(channel_id, thread_ts)
         if thread is None:
-            return
+            return False
+        if _already_delivered(db, thread.session_id, slack_ts):
+            logger.info(f"Slack bridge reply {slack_ts} already delivered; skipping")
+            return True
+        # ponytail: check-then-insert, not atomic — an event and a poll tick
+        # landing in the same instant could both pass this check. A unique index
+        # on (session_id, attributes->>'slack_ts') is the upgrade path.
         session_record = SessionToAgentRepository(db).get_session(thread.session_id)
         if session_record is None:
-            return
+            return False
 
         local_user = None
         try:
@@ -247,9 +320,10 @@ async def handle_operator_reply(
         # The widget renders this: strip anything unsafe rather than storing it.
         message = sanitize_message(reply)
         if not message or not message.strip():
+            # Retrying cannot make unsafe text safe, so the poller may move on.
             logger.warning("Slack bridge reply stripped as unsafe; dropping it")
-            return
-        ChatRepository(db).create_message({
+            return True
+        message_data = {
             'message': message,
             'message_type': 'agent',
             'session_id': session_record.session_id,
@@ -257,7 +331,12 @@ async def handle_operator_reply(
             'agent_id': session_record.agent_id,
             'customer_id': session_record.customer_id,
             'user_id': user_id,
-        })
+        }
+        if slack_ts:
+            # Read by `_already_delivered` so the event and poll paths cannot
+            # both deliver this reply.
+            message_data['attributes'] = {'slack_ts': slack_ts}
+        ChatRepository(db).create_message(message_data)
 
         result = await deliver_to_customer(db, session_record, {
             'message': message,
@@ -267,8 +346,145 @@ async def handle_operator_reply(
             'agent_name': local_user.full_name if local_user else None,
         })
         if not result.ok:
+            # The message is stored, so a retry would duplicate it; delivery is
+            # best-effort exactly as it is for the event path.
             logger.warning(f"Slack bridge reply not delivered: {result.reason}")
+        return True
     except Exception as e:
         logger.error(f"Slack bridge operator reply failed: {str(e)}")
+        return False
     finally:
         db.close()
+
+
+# --- inbound polling --------------------------------------------------------
+# The Events API is the fast path; this is the path that works when Slack
+# cannot reach the app at all. Both funnel into `handle_operator_reply`, and
+# the stored `slack_ts` keeps a reply from being delivered twice.
+
+def _poll_account(db: Session, organization_id):
+    """The org's active Slack account and decrypted credentials, or (None, {})."""
+    account = _active_slack_account(db, organization_id)
+    if account is None:
+        return None, {}
+    try:
+        return account, ChannelAccountRepository(db).get_credentials(account) or {}
+    except Exception as e:
+        logger.warning(f"Slack account {account.id} credentials unreadable: {str(e)}")
+        return None, {}
+
+
+def _log_account_absent_once(organization_id) -> None:
+    global _account_absent_logged
+    if not _account_absent_logged:
+        logger.debug(
+            f"Slack bridge poller idle: no active Slack account for org {organization_id}")
+        _account_absent_logged = True
+
+
+async def _poll_thread(
+    db: Session,
+    thread: SlackHandoffThread,
+    *,
+    team_id: str,
+    token: str,
+    bot_user_id: str,
+) -> None:
+    """Deliver every unhandled operator reply in one thread, then advance it.
+
+    The cursor moves only past replies that are settled. A reply that returns
+    False stops this thread's tick, so the next one retries it.
+    """
+    cursor = thread.last_processed_ts or thread.thread_ts
+    data = await slack_api('conversations.replies', token, {
+        'channel': thread.channel_id,
+        'ts': thread.thread_ts,
+        # `oldest` is exclusive by default, so the handoff notice itself (ts ==
+        # thread_ts) and everything already handled stay out of the page.
+        'oldest': cursor,
+        'limit': REPLIES_PAGE_LIMIT,
+    }, form=True)
+    if not data.get('ok'):
+        logger.warning(f"Slack bridge replies poll rejected: {data.get('error')}")
+        return
+
+    handled_ts = cursor
+    for message in data.get('messages') or []:
+        ts = str(message.get('ts') or '')
+        if not ts or not _ts_after(ts, cursor):
+            continue
+        if not _is_operator_message(message, bot_user_id):
+            handled_ts = ts
+            continue
+        text = (message.get('text') or '').strip()
+        if not text:
+            handled_ts = ts
+            continue
+        if not await handle_operator_reply(
+                team_id, thread.channel_id, thread.thread_ts,
+                str(message.get('user') or ''), text, ts):
+            break
+        handled_ts = ts
+
+    if handled_ts != cursor:
+        SlackHandoffThreadRepository(db).advance(thread, handled_ts)
+
+
+async def poll_bridge_threads() -> None:
+    """One poll tick: read every bridged thread in the bridge channel."""
+    channel_id = settings.SLACK_BRIDGE_CHANNEL_ID
+    if not channel_id:
+        return
+    db = SessionLocal()
+    try:
+        accounts: dict = {}
+        # ponytail: every bridged thread is polled each tick, as specified —
+        # idle threads accumulate, so a channel holding hundreds of them will
+        # approach conversations.replies' rate limit. Narrow this list (closed
+        # sessions, an age cut-off) if the channel ever gets that busy.
+        for thread in SlackHandoffThreadRepository(db).list_for_channel(channel_id):
+            organization_id = thread.organization_id
+            if organization_id not in accounts:
+                accounts[organization_id] = _poll_account(db, organization_id)
+            account, credentials = accounts[organization_id]
+            if account is None:
+                _log_account_absent_once(organization_id)
+                continue
+            token = str(credentials.get('access_token') or '')
+            if not token:
+                continue
+            try:
+                await _poll_thread(
+                    db, thread,
+                    team_id=account.external_account_id,
+                    token=token,
+                    bot_user_id=str(credentials.get('bot_user_id') or ''),
+                )
+            except Exception as e:
+                # One unreachable thread must not starve the rest of the tick.
+                logger.error(f"Slack bridge thread poll failed: {str(e)}")
+    finally:
+        db.close()
+
+
+async def run_bridge_poller_loop() -> None:
+    """Poll the bridge channel for operator replies until the app shuts down.
+
+    Inert — one debug line and a return — when the bridge is unconfigured. A
+    failed tick is logged and swallowed: a Slack outage or a rotated token must
+    never take the API down with it.
+    """
+    if not settings.SLACK_BRIDGE_CHANNEL_ID:
+        logger.debug("Slack bridge poller idle: SLACK_BRIDGE_CHANNEL_ID is unset")
+        return
+    logger.info(f"Slack bridge poller started ({POLL_INTERVAL_SECONDS}s interval)")
+    try:
+        while True:
+            try:
+                await poll_bridge_threads()
+            except Exception as e:
+                logger.error(f"Slack bridge poller tick failed: {str(e)}")
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
+    except asyncio.CancelledError:
+        logger.info("Slack bridge poller stopped")
+        raise

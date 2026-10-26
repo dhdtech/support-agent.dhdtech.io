@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from typing import Optional
+from typing import List, Optional
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
@@ -57,6 +57,34 @@ class SlackHandoffThreadRepository:
         except Exception as e:
             logger.error(f"Error getting Slack handoff thread for session: {str(e)}")
             return None
+
+    def list_for_channel(self, channel_id: str) -> List[SlackHandoffThread]:
+        """Every bridged thread in the bridge channel, oldest first.
+
+        The equality on channel_id is served by the leftmost column of
+        uq_slack_handoff_thread, so this adds no index of its own.
+        """
+        try:
+            return (
+                self.db.query(SlackHandoffThread)
+                .filter(SlackHandoffThread.channel_id == channel_id)
+                .order_by(SlackHandoffThread.created_at)
+                .all()
+            )
+        except Exception as e:
+            logger.error(f"Error listing Slack handoff threads: {str(e)}")
+            return []
+
+    def advance(self, thread: SlackHandoffThread, last_processed_ts: str) -> bool:
+        """Move the thread's cursor to a handled reply; False leaves it untouched."""
+        try:
+            thread.last_processed_ts = last_processed_ts
+            self.db.commit()
+            return True
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"Error advancing Slack handoff thread: {str(e)}")
+            return False
 
     def create(
         self,

@@ -50,4 +50,7 @@ class SlackHandoffThread(Base):
         nullable=False,
         index=True,
     )
+    # Slack ts of the last reply the poller handled. NULL means "nothing yet";
+    # the poll starts from thread_ts in that case.
+    last_processed_ts = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

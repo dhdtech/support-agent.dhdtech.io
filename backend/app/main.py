@@ -51,6 +51,7 @@ except ImportError:
     print("Enterprise models not available")
 from app.api import session_to_agent
 from app.workers.chat_auto_closer import run_auto_closer_loop
+from app.services.slack_bridge import run_bridge_poller_loop
 
 logger = get_logger(__name__)
 
@@ -63,9 +64,18 @@ async def lifespan(app: FastAPI):
     verify_secret_configuration()
     initialize_firebase()
     await startup_event(app)
-    yield
-    # Shutdown
-    pass
+    try:
+        yield
+    finally:
+        # The poller is cancelled, not merely abandoned, so an in-flight Slack
+        # call is not still running against a shutting-down process.
+        bridge_task = getattr(app.state, 'slack_bridge_task', None)
+        if bridge_task is not None:
+            bridge_task.cancel()
+            try:
+                await bridge_task
+            except asyncio.CancelledError:
+                pass
 
 # Move the CORS setup before app instantiation
 cors_origins = get_cors_origins()
@@ -99,6 +109,11 @@ async def startup_event(api: FastAPI):
     # Start chat auto-closer background task, AI chat will auto close after 1 day.
     # Held on app.state so the task cannot be garbage-collected mid-run.
     api.state.auto_closer_task = asyncio.create_task(run_auto_closer_loop())
+
+    # Inbound Slack bridge: polls the bridge channel for operator replies when
+    # Slack's Events API delivers nothing. Inert unless the bridge channel is
+    # configured, and cancelled in lifespan's shutdown.
+    api.state.slack_bridge_task = asyncio.create_task(run_bridge_poller_loop())
 
 # Include routers
 app.include_router(

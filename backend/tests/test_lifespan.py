@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -31,10 +32,17 @@ async def test_lifespan_runs_every_startup_step_once():
         patch("app.main.configure_socketio") as configure_socketio,
         patch("app.main.initialize_cors_listener") as cors_listener,
         patch("app.main.run_auto_closer_loop", new=AsyncMock()) as auto_closer,
+        patch("app.main.run_bridge_poller_loop", new=AsyncMock()) as bridge_poller,
     ):
         async with lifespan(api):
             task = api.state.auto_closer_task
+            bridge_task = api.state.slack_bridge_task
+            # Let both background tasks start before shutdown cancels the poller.
+            await asyncio.sleep(0)
         await task
+        # lifespan cancelled and awaited the poller itself; it must not be
+        # left running past shutdown.
+        assert bridge_task.done()
 
     verify_key.assert_called_once_with()
     verify_secrets.assert_called_once_with()
@@ -42,6 +50,7 @@ async def test_lifespan_runs_every_startup_step_once():
     configure_socketio.assert_called_once()
     cors_listener.assert_called_once_with()
     auto_closer.assert_awaited_once_with()
+    bridge_poller.assert_awaited_once_with()
 
 
 def test_startup_work_is_not_left_on_the_dead_on_event_list():

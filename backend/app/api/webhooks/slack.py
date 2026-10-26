@@ -176,6 +176,8 @@ async def slack_webhook(
             event.get("thread_ts", ""),
             str(event.get("user", "")),
             event.get("text") or "",
+            # Stored on the message so the poller does not deliver it again.
+            event.get("ts") or "",
         )
         return {"status": "ok"}
 
