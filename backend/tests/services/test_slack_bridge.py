@@ -22,7 +22,9 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import time
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -30,13 +32,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main  # noqa: F401 — ensures routers are registered on the FastAPI app
+from app.api import widget_chat
 from app.core.application import app
 from app.core.config import settings
 from app.database import get_db
 from app.models.chat_history import ChatHistory
 from app.models.organization import Organization
 from app.models.session_to_agent import SessionStatus, SessionToAgent
-from app.models.user import User
+from app.models.user import User, UserGroup
 from app.repositories.channels import ChannelAccountRepository
 from app.repositories.session_to_agent import SessionToAgentRepository
 from app.repositories.slack_bridge import SlackHandoffThreadRepository
@@ -267,9 +270,12 @@ async def test_operator_reply_is_stored_taken_over_and_delivered(
 
 
 @pytest.mark.asyncio
-async def test_a_reply_without_a_matching_user_still_silences_the_ai(
-        db, bridge_session, bridged, slack_account, monkeypatch):
-    deliver = await _run_operator_reply(db, monkeypatch, None)
+async def test_a_reply_with_no_local_user_at_all_is_delivered_and_skips_takeover(
+        db, bridge_session, bridged, slack_account, monkeypatch, caplog):
+    # The org has no active user, so there is nobody to take the chat over to.
+    # The reply still reaches the visitor; only the assignment is skipped.
+    with caplog.at_level(logging.WARNING, logger="app.services.slack_bridge"):
+        deliver = await _run_operator_reply(db, monkeypatch, None)
 
     stored = SessionToAgentRepository(db).get_session(bridge_session.session_id)
     assert stored.user_id is None
@@ -279,6 +285,166 @@ async def test_a_reply_without_a_matching_user_still_silences_the_ai(
         ChatHistory.session_id == bridge_session.session_id).one()
     assert message.user_id is None
     deliver.assert_awaited_once()
+    assert "takeover skipped" in caplog.text
+
+
+def _org_user(db, organization, email, *, created_at, is_active=True):
+    user = User(
+        id=uuid4(),
+        organization_id=organization.id,
+        email=email,
+        full_name=email,
+        is_active=is_active,
+        created_at=created_at,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def _add_to_agent_group(db, agent, organization, user):
+    group = UserGroup(name=f"Group {user.email}", organization_id=organization.id)
+    db.add(group)
+    db.commit()
+    db.refresh(group)
+    group.users.append(user)
+    agent.groups.append(group)
+    db.commit()
+    return group
+
+
+@pytest.mark.asyncio
+async def test_a_matching_email_wins_over_the_fallback(
+        db, bridge_session, bridged, slack_account, test_agent,
+        test_organization, test_user, monkeypatch):
+    # An older group member is what the fallback would pick; the email match
+    # must still be the one attributed.
+    member = _org_user(db, test_organization, "ops@example.com",
+                       created_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
+    _add_to_agent_group(db, test_agent, test_organization, member)
+
+    await _run_operator_reply(db, monkeypatch, test_user.email)
+
+    stored = SessionToAgentRepository(db).get_session(bridge_session.session_id)
+    assert stored.user_id == test_user.id
+    message = db.query(ChatHistory).filter(
+        ChatHistory.session_id == bridge_session.session_id).one()
+    assert message.user_id == test_user.id
+
+
+@pytest.mark.asyncio
+async def test_no_email_falls_back_to_a_member_of_the_agents_group(
+        db, bridge_session, bridged, slack_account, test_agent,
+        test_organization, monkeypatch):
+    _org_user(db, test_organization, "oldest@example.com",
+              created_at=datetime(2019, 1, 1, tzinfo=timezone.utc))
+    member = _org_user(db, test_organization, "ops@example.com",
+                       created_at=datetime(2021, 1, 1, tzinfo=timezone.utc))
+    _add_to_agent_group(db, test_agent, test_organization, member)
+
+    await _run_operator_reply(db, monkeypatch, None)
+
+    stored = SessionToAgentRepository(db).get_session(bridge_session.session_id)
+    assert stored.user_id == member.id
+    assert stored.status == SessionStatus.TRANSFERRED
+
+
+@pytest.mark.asyncio
+async def test_no_group_member_falls_back_to_the_oldest_active_org_user(
+        db, bridge_session, bridged, slack_account, test_organization, monkeypatch):
+    _org_user(db, test_organization, "inactive@example.com", is_active=False,
+              created_at=datetime(2018, 1, 1, tzinfo=timezone.utc))
+    oldest = _org_user(db, test_organization, "oldest@example.com",
+                       created_at=datetime(2019, 1, 1, tzinfo=timezone.utc))
+    _org_user(db, test_organization, "newest@example.com",
+              created_at=datetime(2021, 1, 1, tzinfo=timezone.utc))
+
+    await _run_operator_reply(db, monkeypatch, None)
+
+    stored = SessionToAgentRepository(db).get_session(bridge_session.session_id)
+    assert stored.user_id == oldest.id
+    assert stored.status == SessionStatus.TRANSFERRED
+
+
+@pytest.mark.asyncio
+async def test_an_existing_assignee_is_not_overwritten_by_the_fallback(
+        db, bridge_session, bridged, slack_account, test_organization,
+        test_user, monkeypatch):
+    _org_user(db, test_organization, "oldest@example.com",
+              created_at=datetime(2019, 1, 1, tzinfo=timezone.utc))
+    SessionToAgentRepository(db).assign_user(bridge_session.session_id, test_user.id)
+
+    deliver = await _run_operator_reply(db, monkeypatch, None)
+
+    stored = SessionToAgentRepository(db).get_session(bridge_session.session_id)
+    assert stored.user_id == test_user.id
+    message = db.query(ChatHistory).filter(
+        ChatHistory.session_id == bridge_session.session_id).one()
+    assert message.user_id == test_user.id
+    deliver.assert_awaited_once()
+
+
+@pytest.fixture
+def widget_sio():
+    sio = MagicMock()
+    sio.emit = AsyncMock()
+    sio.get_session = AsyncMock()
+    sio.get_environ = MagicMock(return_value={})
+    sio.save_session = AsyncMock()
+    return sio
+
+
+@pytest.mark.asyncio
+async def test_the_next_visitor_message_does_not_reach_the_ai_after_the_takeover(
+        db, bridge_session, bridged, slack_account, test_widget,
+        test_user, widget_sio, monkeypatch):
+    # The production case: Slack returns no email, so the fallback takes the
+    # chat over. The very next visitor message must be relayed to the human,
+    # not answered by the AI.
+    await _run_operator_reply(db, monkeypatch, None)
+
+    stored = SessionToAgentRepository(db).get_session(bridge_session.session_id)
+    assert stored.user_id == test_user.id
+
+    monkeypatch.setattr(widget_chat, "sio", widget_sio)
+    monkeypatch.setattr(widget_chat, "get_db", lambda: iter([db]))
+    monkeypatch.setattr(widget_chat, "notify_new_chat", AsyncMock())
+    forward = AsyncMock()
+    monkeypatch.setattr(widget_chat, "forward_visitor_message", forward)
+    create_async = AsyncMock()
+    monkeypatch.setattr(widget_chat.ChatAgent, "create_async", create_async)
+    availability = AsyncMock()
+    monkeypatch.setattr(widget_chat, "get_agent_availability_response", availability)
+    widget_sio.get_session.return_value = {
+        "widget_id": str(test_widget.id),
+        "org_id": str(stored.organization_id),
+        "agent_id": str(stored.agent_id),
+        "customer_id": str(stored.customer_id),
+        "session_id": str(stored.session_id),
+        "conversation_token": "test-token",
+    }
+    # The real lookup binds the string customer id SQLite's UUID column cannot
+    # take; the session fetched here is the one widget_chat would get.
+    monkeypatch.setattr(
+        SessionToAgentRepository, "get_active_customer_session",
+        lambda self, customer_id, agent_id=None: stored)
+
+    await widget_chat.handle_widget_chat("sid-1", {"message": "Are you still there?"})
+
+    create_async.assert_not_awaited()
+    availability.assert_not_awaited()
+    forward.assert_awaited_once()
+    events = [call[0][0] for call in widget_sio.emit.call_args_list]
+    assert "bot_typing" not in events
+    assert "chat_response" not in events
+    assert "error" not in events
+    assert "chat_reply" in events
+
+    visitor_message = db.query(ChatHistory).filter(
+        ChatHistory.session_id == bridge_session.session_id,
+        ChatHistory.message_type == "user").one()
+    assert visitor_message.user_id == test_user.id
 
 
 @pytest.mark.asyncio

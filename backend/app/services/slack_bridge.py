@@ -43,9 +43,11 @@ from app.channels.slack import slack_api
 from app.core.config import settings
 from app.core.logger import get_logger
 from app.database import SessionLocal
+from app.models.agent import agent_usergroup
 from app.models.channels import ChannelAccount, ChannelType, SlackHandoffThread
 from app.models.chat_history import ChatHistory
 from app.models.session_to_agent import SessionStatus
+from app.models.user import User, user_groups
 from app.repositories.channels import ChannelAccountRepository
 from app.repositories.chat import ChatRepository
 from app.repositories.session_to_agent import SessionToAgentRepository
@@ -258,6 +260,42 @@ def _matched_local_user(db: Session, email: Optional[str], organization_id) -> O
     return user
 
 
+def _fallback_local_user(db: Session, agent_id, organization_id):
+    """An active user of the organization to attribute a takeover to.
+
+    `users.info` only returns the operator's email when the Slack app holds
+    `users:read.email`; without it the reply resolves to no user and the
+    session stays AI-handled. This picks a stand-in deterministically: a member
+    of a group the agent serves, else the oldest active user in the org. The
+    organization filter is not optional — attributing the chat to another
+    tenant's user would leak the conversation into their inbox.
+
+    Returns (user, path), either possibly None/''.
+    """
+    if not organization_id:
+        return None, ''
+    active_in_org = db.query(User).filter(
+        User.organization_id == organization_id,
+        User.is_active.is_(True),
+    )
+    if agent_id:
+        member = (
+            active_in_org
+            .join(user_groups, user_groups.c.user_id == User.id)
+            .join(agent_usergroup, agent_usergroup.c.group_id == user_groups.c.group_id)
+            .filter(agent_usergroup.c.agent_id == agent_id)
+            .order_by(User.created_at.asc(), User.id.asc())
+            .first()
+        )
+        if member is not None:
+            return member, 'group member'
+    oldest = active_in_org.order_by(
+        User.created_at.asc(), User.id.asc()).first()
+    if oldest is not None:
+        return oldest, 'org fallback'
+    return None, ''
+
+
 async def handle_operator_reply(
     team_id: str,
     channel_id: str,
@@ -300,13 +338,33 @@ async def handle_operator_reply(
             return False
 
         local_user = None
+        matched_by = ''
         try:
             profile = await get_adapter(ChannelType.SLACK.value).fetch_profile(
                 account, slack_user_id)
             local_user = _matched_local_user(
                 db, (profile or {}).get('email'), session_record.organization_id)
+            matched_by = 'matched email' if local_user is not None else ''
         except Exception as e:
             logger.error(f"Slack bridge users.info failed: {str(e)}")
+
+        if local_user is None:
+            if session_record.user_id is not None:
+                # Already claimed in the dashboard: keep that assignee rather
+                # than overwriting it with a fallback picked from the org.
+                local_user = UserRepository(db).get_user(session_record.user_id)
+                matched_by = 'existing assignee'
+            else:
+                local_user, matched_by = _fallback_local_user(
+                    db, session_record.agent_id, session_record.organization_id)
+        if local_user is not None:
+            logger.info(
+                f"Slack bridge reply for session {thread.session_id} attributed to "
+                f"user {local_user.id} ({matched_by})")
+        else:
+            logger.warning(
+                f"Slack bridge reply for session {thread.session_id} has no active "
+                f"user in org {session_record.organization_id}; takeover skipped")
 
         user_id = str(local_user.id) if local_user else None
         if user_id:
