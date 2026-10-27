@@ -9,6 +9,10 @@ window.ChatterMate;
 /** @type {object|undefined} Declarative options, same shape as ChatterMate.init(options). */
 window.chattermateConfig;
 
+// Launcher face helpers, shared with the unit tests. esbuild bundles this import
+// into chattermate.min.js (see scripts/build-webclient-*.ts).
+import { createLauncherPhoto, resolveLauncherPhotoUrl } from './launcher-photo'
+
 ;(function () {
   // Function to validate hex color code
   function isValidHexColor(color) {
@@ -63,6 +67,7 @@ window.chattermateConfig;
     sidebarWidth: 420, // Panel width in the sidebar display modes
     searchBarWidth: 320, // Trigger bar width in search-bar mode
     searchPlaceholder: 'Ask anything...',
+    photoUrl: null, // customization.photo_url — the launcher face, resolved against baseUrl
     zIndex: 999999, // Stacking base; related layers offset from it (badge -1, mobile chrome +1/+2)
     trigger: null, // Optional CSS selector — matching elements toggle the chat on click
     hotkey: true, // ⌘K opens the Ask AI palette; set false if the site owns that key
@@ -361,6 +366,26 @@ window.chattermateConfig;
       }
       #${config.buttonId}.active .cm-chevron { display: block; }
 
+      /* ===== Agent photo (customization.photo_url) =====
+         Fills the button instead of the mark and the chevron. The radius lives on
+         the image rather than an overflow:hidden on the button, so the expanding
+         ring and the unread badge are not clipped. */
+      #${config.buttonId} .cm-photo {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        border-radius: 20px 20px 20px 6px;
+        pointer-events: none;
+      }
+      /* The rings are the button's own brand colour and sweep across the image, so
+         a photo launcher drops them — the photo is the attention cue. The float
+         animation stays, and the photo keeps the mark's place in the open state. */
+      #${config.buttonId}.has-photo .cm-ring,
+      #${config.buttonId}.has-photo .cm-dots,
+      #${config.buttonId}.has-photo .cm-chevron { display: none; }
+
       /* Unread badge = number of nudges */
       #${config.buttonId} .cm-badge {
         position: absolute;
@@ -382,7 +407,8 @@ window.chattermateConfig;
       #${config.buttonId}.active .cm-badge { display: none; }
 
       #${config.buttonId}.loading .cm-dots,
-      #${config.buttonId}.loading .cm-chevron { visibility: hidden; }
+      #${config.buttonId}.loading .cm-chevron,
+      #${config.buttonId}.loading .cm-photo { visibility: hidden; }
       #${config.buttonId}.loading:after {
         content: '';
         position: absolute;
@@ -420,6 +446,7 @@ window.chattermateConfig;
         #${config.buttonId} .cm-ring,
         #${config.buttonId} .cm-dots,
         #${config.buttonId} .cm-chevron,
+        #${config.buttonId} .cm-photo,
         #${config.buttonId}.active .cm-chevron { display: none; }
         /* Dark spinner — the stock white one vanishes on the white bar. */
         #${config.buttonId}.loading .cm-search { visibility: hidden; }
@@ -1160,7 +1187,8 @@ window.chattermateConfig;
   }
 
   // Set text content on launcher children (textContent, never innerHTML — the
-  // placeholder can come from dashboard settings).
+  // placeholder can come from dashboard settings) and keep the launcher face in
+  // sync with the customization. Every config change funnels through updateStyles().
   function syncLauncherContent() {
     const btn = document.getElementById(config.buttonId)
     if (!btn) return
@@ -1168,6 +1196,31 @@ window.chattermateConfig;
     if (placeholder && placeholder.textContent !== config.searchPlaceholder) {
       placeholder.textContent = config.searchPlaceholder
     }
+    syncLauncherFace(btn)
+  }
+
+  // The launcher shows the agent's photo when the widget has one, and the pulsing
+  // mark / chevron baked into the button markup otherwise. The image is built as a
+  // DOM node — photo_url is organization-supplied data, so interpolating it into an
+  // HTML string would be an XSS sink.
+  function syncLauncherFace(btn) {
+    const src = resolveLauncherPhotoUrl(config.photoUrl, config.baseUrl)
+    const current = btn.querySelector('.cm-photo')
+    if (current && current.getAttribute('src') === src) return
+    if (current) current.remove()
+    btn.classList.toggle('has-photo', !!src)
+    if (!src) return
+    const photo = createLauncherPhoto(src, document)
+    if (!photo) return
+    // A broken photo must not leave an empty launcher: fall back to the mark. Only
+    // the current image may do that — a slower earlier photo failing after a newer
+    // one has replaced it must not strip the new one's class.
+    photo.addEventListener('error', function () {
+      if (btn.querySelector('.cm-photo') !== photo) return
+      photo.remove()
+      btn.classList.remove('has-photo')
+    })
+    btn.appendChild(photo)
   }
 
   // A token is only usable if it's a non-empty string. The stringified "undefined"
@@ -2078,6 +2131,9 @@ window.chattermateConfig;
       const customData = event.data.data;
       const newColor = customData.chat_bubble_color;
       config.chatBubbleColor = isValidHexColor(newColor) ? newColor : config.chatBubbleColor;
+      // The agent photo the widget renders in its own header, used as the launcher
+      // face. Absent or non-string clears it back to the default mark.
+      config.photoUrl = typeof customData.photo_url === 'string' ? customData.photo_url : null;
       if (typeof customData.chat_style === 'string') {
         config.chatStyle = customData.chat_style;
       }

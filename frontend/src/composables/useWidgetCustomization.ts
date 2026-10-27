@@ -76,6 +76,9 @@ export function useWidgetCustomization() {
                 chat_bubble_color: newCustomization.chat_bubble_color || '#C9F24E',
                 chat_style: newCustomization.chat_style,
                 chat_initiation_messages: newCustomization.chat_initiation_messages || [],
+                // The embed loader shows it as the launcher face; signed or relative
+                // exactly as the widget received it.
+                photo_url: newCustomization.photo_url,
                 // Dashboard "Widget placement" defaults — the embed loader merges these
                 // under any options the installing developer set.
                 widget_display: newCustomization.customization_metadata?.widget_display

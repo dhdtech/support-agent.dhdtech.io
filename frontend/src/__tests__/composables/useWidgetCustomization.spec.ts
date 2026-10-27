@@ -50,4 +50,14 @@ describe('useWidgetCustomization', () => {
         expect(message.type).toBe('CUSTOMIZATION_UPDATE')
         expect(message.data.widget_display).toBeUndefined()
     })
+
+    it('forwards photo_url so the launcher can show the agent photo', () => {
+        const postMessage = vi.spyOn(window.parent, 'postMessage').mockImplementation(() => {})
+        const { applyCustomization } = useWidgetCustomization()
+
+        applyCustomization({ photo_url: '/api/v1/uploads/agents/org/a.png' } as any)
+
+        const message = postMessage.mock.calls.at(-1)![0] as any
+        expect(message.data.photo_url).toBe('/api/v1/uploads/agents/org/a.png')
+    })
 })
