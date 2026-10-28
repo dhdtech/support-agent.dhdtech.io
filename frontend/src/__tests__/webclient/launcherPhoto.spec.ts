@@ -190,6 +190,11 @@ describe('launcher face in the embed loader', () => {
 
     expect(button().querySelector('.cm-photo')).toBeNull()
     expect(button().classList.contains('has-photo')).toBe(false)
+    // The transparent state is keyed on the class alone, so dropping it restores the
+    // brand bubble, its shadow and the mark.
+    expect(
+      (document.getElementById('chattermate-styles')?.textContent ?? '').replace(/\s+/g, ' ')
+    ).toContain('#chattermate-button { position: fixed;')
   })
 
   it('ignores a stale photo failing after a newer one replaced it', async () => {
@@ -230,5 +235,57 @@ describe('launcher face in the embed loader', () => {
 
     btn.click()
     expect(btn.classList.contains('active')).toBe(false)
+  })
+
+  /** The injected launcher stylesheet, whitespace-normalised for matching. */
+  function stylesheet(): string {
+    return (document.getElementById('chattermate-styles')?.textContent ?? '').replace(/\s+/g, ' ')
+  }
+
+  /** The declaration body of one rule, addressed by its exact selector. */
+  function ruleBody(selector: string): string {
+    const css = stylesheet()
+    const start = css.indexOf(`${selector} {`)
+    if (start === -1) return ''
+    return css.slice(start, css.indexOf('}', start))
+  }
+
+  it('makes the launcher transparent behind the agent photo', async () => {
+    await loadLoader()
+    fromFrame({
+      type: 'CUSTOMIZATION_UPDATE',
+      data: { chat_bubble_color: '#123456', photo_url: '/api/v1/uploads/agents/a.png' },
+    })
+
+    // Only the image is left: no brand bubble, no drop shadow, no inset ring.
+    const body = ruleBody('#chattermate-button.has-photo')
+    expect(body).toContain('background: transparent')
+    expect(body).toContain('box-shadow: none')
+    // The spinner was drawn for the bubble; transparent, it needs the brand colour.
+    expect(ruleBody('#chattermate-button.has-photo.loading:after')).toContain('border-top-color')
+  })
+
+  it('fits the photo inside the button box without cropping or clipping it', async () => {
+    await loadLoader()
+
+    const body = ruleBody('#chattermate-button .cm-photo')
+    // contain, not cover: a cut-out mascot must not be cropped by the square box.
+    expect(body).toContain('object-fit: contain')
+    // The image follows the button's own size (64px, 56px on the mobile rule).
+    expect(body).toContain('inset: 0')
+    expect(body).toContain('width: 100%')
+    expect(body).toContain('height: 100%')
+    expect(body).not.toContain('border-radius')
+  })
+
+  it('keeps the brand bubble and its shadow when no photo is present', async () => {
+    await loadLoader()
+    fromFrame({ type: 'CUSTOMIZATION_UPDATE', data: { chat_bubble_color: '#123456' } })
+
+    expect(button().classList.contains('has-photo')).toBe(false)
+    const body = ruleBody('#chattermate-button')
+    expect(body).toContain('background:')
+    expect(body).toContain('box-shadow: 0 16px 40px')
+    expect(body).toContain('inset 0 0 0 1px')
   })
 })

@@ -367,24 +367,38 @@ import { createLauncherPhoto, resolveLauncherPhotoUrl } from './launcher-photo'
       #${config.buttonId}.active .cm-chevron { display: block; }
 
       /* ===== Agent photo (customization.photo_url) =====
-         Fills the button instead of the mark and the chevron. The radius lives on
-         the image rather than an overflow:hidden on the button, so the expanding
-         ring and the unread badge are not clipped. */
+         The photo IS the launcher. It fills the button's 64px box (56px on the
+         mobile rule) with contain, so a cut-out mascot is never cropped, and it
+         carries no radius of its own — the box is transparent and the image is not
+         clipped by it. */
       #${config.buttonId} .cm-photo {
         position: absolute;
         inset: 0;
         width: 100%;
         height: 100%;
-        object-fit: cover;
-        border-radius: 20px 20px 20px 6px;
+        object-fit: contain;
         pointer-events: none;
       }
       /* The rings are the button's own brand colour and sweep across the image, so
          a photo launcher drops them — the photo is the attention cue. The float
-         animation stays, and the photo keeps the mark's place in the open state. */
+         animation stays: it moves the transparent button, so the robot itself bobs
+         exactly as the bubble did. The photo keeps the mark's place in the open
+         state. */
       #${config.buttonId}.has-photo .cm-ring,
       #${config.buttonId}.has-photo .cm-dots,
       #${config.buttonId}.has-photo .cm-chevron { display: none; }
+      /* Nothing renders behind the image: no brand bubble, no drop shadow, and the
+         inset ring (whose shadow declaration this replaces) goes with it. */
+      #${config.buttonId}.has-photo {
+        background: transparent;
+        box-shadow: none;
+      }
+      /* The spinner is white on the brand bubble; with the bubble gone it takes the
+         brand colour so it stays visible over the host page's own background. */
+      #${config.buttonId}.has-photo.loading:after {
+        border-color: ${config.chatBubbleColor}33;
+        border-top-color: ${config.chatBubbleColor};
+      }
 
       /* Unread badge = number of nudges */
       #${config.buttonId} .cm-badge {
@@ -429,8 +443,10 @@ import { createLauncherPhoto, resolveLauncherPhotoUrl } from './launcher-photo'
       ${mode === 'search-bar' ? `
       @media (min-width: 769px) {
         /* ===== Search-bar mode: the launcher becomes a search-input-like bar.
-           Same element, same click/toggle/badge logic. Mobile keeps the bubble. ===== */
-        #${config.buttonId} {
+           Same element, same click/toggle/badge logic. Mobile keeps the bubble.
+           The photo is hidden here, so `.has-photo` must not strip the bar's own
+           surface — the selector carries both. ===== */
+        #${config.buttonId}, #${config.buttonId}.has-photo {
           width: ${config.searchBarWidth}px;
           height: 48px;
           border-radius: 24px;
